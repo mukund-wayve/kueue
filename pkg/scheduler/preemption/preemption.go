@@ -375,14 +375,14 @@ func runFirstFsStrategy(preemptionCtx *preemptionCtx, candidates []*workload.Inf
 
 // runSecondFsStrategy implements Fair Sharing Rule S2-b. It returns
 // (fits, targets).
-func runSecondFsStrategy(retryCandidates []*workload.Info, preemptionCtx *preemptionCtx, targets []*Target, preemptorUnderNominal bool) (bool, []*Target) {
+func runSecondFsStrategy(retryCandidates []*workload.Info, preemptionCtx *preemptionCtx, targets []*Target) (bool, []*Target) {
 	ordering := fairsharing.MakeClusterQueueOrdering(preemptionCtx.preemptorCQ, retryCandidates, preemptionCtx.log, preemptionCtx.clock)
 	var fits bool
 	for candCQ := range ordering.Iter() {
 		preemptorNewShare, targetOldShare := candCQ.ComputeShares()
 		// Due to API validation, we can only reach here if the second strategy is LessThanInitialShare,
 		// in which case the last parameter for the strategy function is irrelevant.
-		if preemptorUnderNominal || fairsharing.LessThanInitialShare(preemptorNewShare, targetOldShare, fairsharing.TargetNewShare{}) {
+		if fairsharing.LessThanInitialShare(preemptorNewShare, targetOldShare, fairsharing.TargetNewShare{}) {
 			// The criteria doesn't depend on the preempted workload, so just preempt the first candidate.
 			targets, fits = preemptCandidate(preemptionCtx, candCQ.PopWorkload(), candCQ, kueue.InCohortFairSharingReason, targets)
 			if fits {
@@ -425,7 +425,7 @@ func (p *Preemptor) fairPreemptions(preemptionCtx *preemptionCtx, strategies []f
 				"targets", logging.GetObjectReferences(targets),
 				"retryCandidates", workload.References(retryCandidates))
 		}
-		fits, targets = runSecondFsStrategy(retryCandidates, preemptionCtx, targets, preemptorUnderNominal)
+		fits, targets = runSecondFsStrategy(retryCandidates, preemptionCtx, targets)
 	}
 
 	revertSimulation()
