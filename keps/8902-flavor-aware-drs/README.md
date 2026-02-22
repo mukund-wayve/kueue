@@ -291,15 +291,18 @@ Since `fairSharing.resourceWeights` is orthogonal to topology and node placement
 
 - Documentation includes configuration guidance and examples.
 - Integration test added for a few more representative examples.
+- Extend the `FairSharingStatus` type with `dominantResource` (and potentially per-flavor ratio details) to improve observability when flavor weights shift the dominant resource. This surfaces on both ClusterQueue and Cohort status, where DRS is computed and used for admission ordering and preemption.
 
 ## Implementation History
 
 - 2026-02-15: Initial draft.
+- 2026-02-22: Revised API spec, added alternatives and TAS interaction details based on feedback.
 
 ## Drawbacks
 
 - Adds additional configuration surface area to ResourceFlavors.
 - DRS becomes slightly more complex to reason about when weights are configured.
+- **Limited observability in Alpha**: `FairSharingStatus` currently only exposes `weightedShare` (an `int64`). It does not include the dominant resource name or a per-flavor breakdown of borrowing/lendable ratios. When flavor weights cause the dominant resource to shift (for example, from `cpu` to `nvidia.com/gpu`), it can be difficult for admins to understand why preemption or admission ordering changed. In Alpha, we accept this limitation. In Beta, we plan to extend `FairSharingStatus` with at least the `dominantResource` name, and potentially per-flavor ratio details, to improve observability.
 
 ## Alternatives
 
