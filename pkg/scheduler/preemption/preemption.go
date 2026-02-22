@@ -412,6 +412,9 @@ func (p *Preemptor) fairPreemptions(preemptionCtx *preemptionCtx, strategies []f
 	// incoming workload, still be within nominal quota for the contested
 	// resources?  If so, preemption should be allowed regardless of DRS
 	// (the workload is entitled to its nominal quota).
+	// This only affects runFirstFsStrategy: when true, all candidates are
+	// preempted unconditionally (bypassing the strategy check), so no
+	// retryCandidates are produced and runSecondFsStrategy has nothing to do.
 	preemptorUnderNominal := preemptorWithinNominalForContestedResources(preemptionCtx)
 
 	// DRS values must include incoming workload.
