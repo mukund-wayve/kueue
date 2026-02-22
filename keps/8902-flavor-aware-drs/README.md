@@ -144,6 +144,10 @@ DRS (and the “dominant resource” choice) is computed **per resource type** (
 
 For example, a cluster may want to treat *GPUs* as premium/scarce while treating *CPU/memory* as roughly comparable across the same set of flavors. If a flavor had a single weight of 8 to reflect “H100 GPUs are 8× more valuable”, then CPU and memory accounted under that flavor would also be treated as 8× more valuable, incorrectly influencing DRS and potentially changing which resource becomes dominant. Per-resource weights let admins express that GPU and CPU/memory should scale differently, and keep DRS meaningful for each resource type.
 
+#### Relationship with AdmissionFairSharing.ResourceWeights
+
+`AdmissionFairSharing.ResourceWeights` and `ResourceFlavor.spec.fairSharing.resourceWeights` share a similar name but are independent and operate at different levels. `AdmissionFairSharing.ResourceWeights` performs **cross-resource-type** weighting (for example, GPUs matter more than CPU) to order workloads across LocalQueues *within* a ClusterQueue based on historical usage. `ResourceFlavor.spec.fairSharing.resourceWeights` performs **cross-flavor** weighting *within* a resource type (for example, H100 GPUs matter more than A10 GPUs) to compute DRS, which affects both **admission ordering** of ClusterQueues across a cohort and **Fair Sharing preemption** decisions. The two are not multiplicative and do not interact: AdmissionFairSharing selects which workload each CQ puts forward, then DRS selects which CQ's workload gets admitted or preempted.
+
 ### Weighted borrowing and lendable
 
 Let:
