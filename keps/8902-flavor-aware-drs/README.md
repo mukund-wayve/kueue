@@ -55,7 +55,7 @@ Today, DRS aggregates borrowing by resource type across flavors, so borrowing 50
 
 ### Overview
 
-- **API**: Add `ResourceFlavor.spec.resourceWeights`, a map from resource name (for example `nvidia.com/gpu`) to a **scalar multiplier**. This lets admins express that some flavors are more valuable than others for a given resource type (for example `h100-reserved` vs `a10-spot` GPUs).
+- **API**: Add `ResourceFlavor.spec.fairSharing.resourceWeights`, a map from resource name (for example `nvidia.com/gpu`) to a **scalar multiplier**. This lets admins express that some flavors are more valuable than others for a given resource type (for example `h100-reserved` vs `a10-spot` GPUs).
 - **Behavior**: When computing DRS, apply the configured multiplier for each $(ResourceFlavor, resource)$ pair so that borrowing on more valuable flavors contributes more to the computed share than borrowing on cheaper flavors. This affects behavior **wherever DRS is used**, including **admission ordering** and **Fair Sharing preemption**.
 - **Backward compatibility**: When weights are unset, the default multiplier is $1.0$, preserving existing behavior.
 - **Details**: Full API spec change, DRS definitions and formulas are described in **Design Details**.
@@ -95,18 +95,18 @@ Borrowing cheap/spot GPU capacity should contribute less to DRS than borrowing p
 - **Risk**: Misconfiguration (extreme weights) can lead to surprising dominant-resource choices and more aggressive preemption for specific resources.
   - **Mitigation**: Validate weights are > 0 and expand documentation with configuration guidelines, dominant-resource examples, and recommended starting points.
 - **Risk**: Changing DRS semantics changes preemption ordering when weights are configured.
-  - **Mitigation**: The change is opt-in via `resourceWeights` and defaults to no-op.
+  - **Mitigation**: The change is opt-in via `fairSharing.resourceWeights` and defaults to no-op.
 
 ## Design Details
 
 ### API change
 
-Extend `ResourceFlavorSpec` with a new optional field:
+Extend `ResourceFlavorSpec` with a new optional `fairSharing` field, consistent with the existing `spec.fairSharing` on ClusterQueue and Cohort:
 
-- `spec.resourceWeights`: a map from resource name (for example `nvidia.com/gpu`) to a multiplier (a positive scalar weight). The name `resourceWeights` is chosen to be consistent with the naming used in Admission Fair Sharing.
-  - **Type**: `map[corev1.ResourceName]resource.Quantity` (serialized as a string quantity), so decimals are supported (for example `"8"`, `"0.5"`).
+- `spec.fairSharing.resourceWeights`: a map from resource name (for example `nvidia.com/gpu`) to a multiplier (a positive scalar weight). The name `resourceWeights` is chosen to be consistent with the naming used in Admission Fair Sharing.
+  - **Type**: `map[corev1.ResourceName]float64`, consistent with `AdmissionFairSharing.ResourceWeights`.
   - Values are treated as **scalar multipliers** (not resource amounts).
-- A missing map or missing entry implies a multiplier of **1.0** for that (flavor, resource) pair.
+- A missing `fairSharing` field, missing map, or missing entry implies a multiplier of **1.0** for that (flavor, resource) pair.
 
 Example:
 
@@ -118,10 +118,11 @@ metadata:
 spec:
   nodeLabels:
     accelerator: nvidia-h100
-  resourceWeights:
-    nvidia.com/gpu: "8"
-    cpu: "1"
-    memory: "1"
+  fairSharing:
+    resourceWeights:
+      nvidia.com/gpu: 8
+      cpu: 1
+      memory: 1
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
@@ -130,10 +131,11 @@ metadata:
 spec:
   nodeLabels:
     accelerator: nvidia-a10
-  resourceWeights:
-    nvidia.com/gpu: "1"
-    cpu: "1"
-    memory: "1"
+  fairSharing:
+    resourceWeights:
+      nvidia.com/gpu: 1
+      cpu: 1
+      memory: 1
 ```
 
 #### Why not choose a single cost/weight per flavor instead of having different weights per resource?
@@ -248,9 +250,15 @@ Guidelines:
 - Default multiplier is 1.0 (per (flavor, resource) pair).
 - Values must be strictly greater than 0 (reject 0 / negative).
 
+### Interaction with Topology-Aware Scheduling (TAS)
+
+`ResourceFlavorSpec` has a CEL validation rule `!has(oldSelf.topologyName) || self == oldSelf` that makes the entire spec immutable when `topologyName` is set. This rule was introduced to protect topology-sensitive fields (`nodeLabels`, `nodeTaints`, `tolerations`, `topologyName`) whose mutation could invalidate the TAS topology tree. Since the rule applies to the whole spec via `self == oldSelf`, adding `fairSharing.resourceWeights` to the spec means weights also cannot be updated in-place on TAS-enabled flavors without deleting and recreating the ResourceFlavor.
+
+Since `fairSharing.resourceWeights` is orthogonal to topology and node placement, we propose relaxing the CEL rule to check immutability of the topology-sensitive fields individually, while allowing `fairSharing` to remain mutable. We would appreciate guidance from TAS maintainers on whether this approach is acceptable or if an alternative is preferred.
+
 ### Backward compatibility
 
-- Existing clusters with no `resourceWeights` configured observe identical behavior.
+- Existing clusters with no `fairSharing.resourceWeights` configured observe identical behavior.
 - The field is optional; upgrades do not require changes to existing manifests.
 
 ### Test Plan
@@ -277,7 +285,7 @@ Guidelines:
 - API field available, documented, and defaulted to no-op (1.0).
 - DRS implementation weighted as described; unit tests added.
 - Integration/e2e coverage for at least one representative heterogeneous-flavor scenario.
-- This change is opt-in via ResourceFlavor.spec.resourceWeights; when unset, behavior is unchanged. So, no feature gate is required.
+- This change is opt-in via ResourceFlavor.spec.fairSharing.resourceWeights; when unset, behavior is unchanged. So, no feature gate is required.
 
 #### Beta
 
@@ -302,4 +310,28 @@ without inflating CPU/memory borrow/lendable calculations. Per-resource weights 
 
 ### Weighting elsewhere (ClusterQueue, ResourceGroup)
 
-We want to keep configuration simple and consistent, so weights are specified per ResourceFlavor and apply cluster-wide. This makes it natural and easy to express the value of each flavor across all ClusterQueues.
+Flavor resource weights could be placed under `ClusterQueue.spec.fairSharing`, for example as a per-ResourceGroup or per-flavor weight map within each ClusterQueue. This would allow different ClusterQueues to assign different weights to the same flavor.
+
+However, the weight captures the intrinsic relative cost/value of a flavor (for example, H100 GPUs are 8x more valuable than A10 GPUs), which does not vary by consumer. Having each ClusterQueue define its own weights would introduce redundant configuration that must be kept in sync across all ClusterQueues in a cohort, and disagreements between ClusterQueues would be difficult to reason about. We prefer specifying weights once on the ResourceFlavor so they apply cluster-wide consistently.
+
+### Weighting in the Kueue Configuration (ConfigMap)
+
+Flavor resource weights could be placed under the `FairSharing` construct in ConfigMap, analogous to how `AdmissionFairSharing` defines `resourceWeights`. Definition could look like so:
+
+```yaml
+fairSharing:
+  preemptionStrategies:
+    - LessThanOrEqualToFinalShare
+  flavorResourceWeights:
+    h100-reserved:
+      nvidia.com/gpu: 8
+    a10-spot:
+      nvidia.com/gpu: 1
+```
+
+This centralizes all fair sharing tuning knobs in one place and avoids CRD schema changes to ResourceFlavor.
+
+However, we chose `ResourceFlavor.spec.fairSharing.resourceWeights` over this approach for these reasons:
+
+- **Loose coupling with flavor names**: The ConfigMap would reference flavor names as plain strings with no built-in validation that the flavor exists. If a flavor is renamed or deleted, the ConfigMap silently retains stale entries. On `ResourceFlavor.spec`, the weights are co-located with the flavor definition.
+- **Consistent with existing precedent**: Fair sharing options that are per-object properties are already defined on CRD APIs rather than in the ConfigMap. `ClusterQueue.spec.fairSharing.weight` and `Cohort.spec.fairSharing.weight` define per-CQ/Cohort weights directly on the CRD, while the ConfigMap holds system-wide behavioral settings (preemption strategies, decay half-life, global resource weights). Flavor resource weights follow this same pattern — they are a per-flavor property, not a system-level tuning knob.
