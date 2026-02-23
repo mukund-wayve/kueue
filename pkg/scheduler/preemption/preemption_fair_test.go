@@ -95,15 +95,15 @@ func TestFairPreemptions(t *testing.T) {
 	}
 	unitWl := *utiltestingapi.MakeWorkload("unit", "").Request(corev1.ResourceCPU, "1")
 	cases := map[string]struct {
-		clusterQueues   []*kueue.ClusterQueue
-		cohorts         []*kueue.Cohort
-		flavors         []*kueue.ResourceFlavor
+		clusterQueues    []*kueue.ClusterQueue
+		cohorts          []*kueue.Cohort
+		flavors          []*kueue.ResourceFlavor
 		assignmentFlavor kueue.ResourceFlavorReference
-		strategies      []config.PreemptionStrategy
-		admitted        []kueue.Workload
-		incoming        *kueue.Workload
-		targetCQ        kueue.ClusterQueueReference
-		wantPreempted   sets.Set[string]
+		strategies       []config.PreemptionStrategy
+		admitted         []kueue.Workload
+		incoming         *kueue.Workload
+		targetCQ         kueue.ClusterQueueReference
+		wantPreempted    sets.Set[string]
 	}{
 		"reclaim nominal from user using the most": {
 			clusterQueues: baseCQs,
