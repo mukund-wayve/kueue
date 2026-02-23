@@ -189,8 +189,11 @@ spec:
             x-kubernetes-validations:
             - message: at least one nodeLabel is required when topology is set
               rule: '!has(self.topologyName) || self.nodeLabels.size() >= 1'
-            - message: resourceFlavorSpec are immutable when topologyName is set
-              rule: '!has(oldSelf.topologyName) || self == oldSelf'
+            - message: nodeLabels, nodeTaints, tolerations, and topologyName are immutable
+                when topologyName is set
+              rule: '!has(oldSelf.topologyName) || (self.nodeLabels == oldSelf.nodeLabels
+                && self.nodeTaints == oldSelf.nodeTaints && self.tolerations == oldSelf.tolerations
+                && has(self.topologyName) && self.topologyName == oldSelf.topologyName)'
         type: object
     served: true
     storage: false
@@ -363,8 +366,11 @@ spec:
             x-kubernetes-validations:
             - message: at least one nodeLabel is required when topology is set
               rule: '!has(self.topologyName) || self.nodeLabels.size() >= 1'
-            - message: resourceFlavorSpec are immutable when topologyName is set
-              rule: '!has(oldSelf.topologyName) || self == oldSelf'
+            - message: nodeLabels, nodeTaints, tolerations, and topologyName are immutable
+                when topologyName is set
+              rule: '!has(oldSelf.topologyName) || (self.nodeLabels == oldSelf.nodeLabels
+                && self.nodeTaints == oldSelf.nodeTaints && self.tolerations == oldSelf.tolerations
+                && has(self.topologyName) && self.topologyName == oldSelf.topologyName)'
         type: object
     served: true
     storage: true
