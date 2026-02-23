@@ -29,7 +29,7 @@ import (
 // ResourceFlavorSpec defines the desired state of the ResourceFlavor
 // The following fields are immutable when topologyName is set because
 // their mutation could invalidate the TAS topology tree:
-// nodeLabels, nodeTaints, tolerations, topologyName
+// nodeLabels, tolerations, topologyName
 type ResourceFlavorSpecApplyConfiguration struct {
 	// nodeLabels are labels that associate the ResourceFlavor with Nodes that
 	// have the same labels.

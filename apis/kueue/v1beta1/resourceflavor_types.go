@@ -46,8 +46,10 @@ type TopologyReference string
 // +kubebuilder:validation:XValidation:rule="!has(self.topologyName) || self.nodeLabels.size() >= 1", message="at least one nodeLabel is required when topology is set"
 // The following fields are immutable when topologyName is set because
 // their mutation could invalidate the TAS topology tree:
-//   nodeLabels, nodeTaints, tolerations, topologyName
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.topologyName) || (self.nodeLabels == oldSelf.nodeLabels && self.nodeTaints == oldSelf.nodeTaints && self.tolerations == oldSelf.tolerations && has(self.topologyName) && self.topologyName == oldSelf.topologyName)", message="nodeLabels, nodeTaints, tolerations, and topologyName are immutable when topologyName is set"
+//   nodeLabels, tolerations, topologyName
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.topologyName) || (has(self.nodeLabels) == has(oldSelf.nodeLabels) && (!has(self.nodeLabels) || self.nodeLabels == oldSelf.nodeLabels))", message="nodeLabels are immutable when topologyName is set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.topologyName) || (has(self.tolerations) == has(oldSelf.tolerations) && (!has(self.tolerations) || self.tolerations == oldSelf.tolerations))", message="tolerations are immutable when topologyName is set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.topologyName) || (has(self.topologyName) && self.topologyName == oldSelf.topologyName)", message="topologyName is immutable when topologyName is set"
 type ResourceFlavorSpec struct {
 	// nodeLabels are labels that associate the ResourceFlavor with Nodes that
 	// have the same labels.
