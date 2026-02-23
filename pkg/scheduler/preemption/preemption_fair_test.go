@@ -120,7 +120,7 @@ func TestFairPreemptions(t *testing.T) {
 			},
 			incoming:      unitWl.Clone().Name("c_incoming").Obj(),
 			targetCQ:      "c",
-			wantPreempted: sets.New(targetKeyReason("/b1", kueue.InCohortFairSharingReason)),
+			wantPreempted: sets.New(targetKeyReason("/b1", kueue.InCohortReclamationReason)),
 		},
 		"can reclaim from queue using less, if taking the latest workload from user using the most isn't enough": {
 			clusterQueues: baseCQs,
@@ -132,7 +132,7 @@ func TestFairPreemptions(t *testing.T) {
 			},
 			incoming:      utiltestingapi.MakeWorkload("c_incoming", "").Request(corev1.ResourceCPU, "3").SimpleReserveQuota("a", "default", now).Obj(),
 			targetCQ:      "c",
-			wantPreempted: sets.New(targetKeyReason("/a1", kueue.InCohortFairSharingReason)), // attempts to preempt b1, but it's not enough.
+			wantPreempted: sets.New(targetKeyReason("/a1", kueue.InCohortReclamationReason)), // attempts to preempt b1, but it's not enough.
 		},
 		"reclaim borrowable quota from user using the most": {
 			clusterQueues: baseCQs,
@@ -164,8 +164,8 @@ func TestFairPreemptions(t *testing.T) {
 			incoming: utiltestingapi.MakeWorkload("c_incoming", "").Request(corev1.ResourceCPU, "2").Obj(),
 			targetCQ: "c",
 			wantPreempted: sets.New(
-				targetKeyReason("/a1", kueue.InCohortFairSharingReason),
-				targetKeyReason("/b1", kueue.InCohortFairSharingReason),
+				targetKeyReason("/a1", kueue.InCohortReclamationReason),
+				targetKeyReason("/b1", kueue.InCohortReclamationReason),
 			),
 		},
 		"can't preempt when everyone under nominal": {
@@ -246,7 +246,7 @@ func TestFairPreemptions(t *testing.T) {
 			},
 			incoming:      utiltestingapi.MakeWorkload("a_incoming", "").Request(corev1.ResourceCPU, "2").Obj(),
 			targetCQ:      "a",
-			wantPreempted: sets.New(targetKeyReason("/b1", kueue.InCohortFairSharingReason)),
+			wantPreempted: sets.New(targetKeyReason("/b1", kueue.InCohortReclamationReason)),
 		},
 		"can't preempt huge workload if the incoming is also huge": {
 			clusterQueues: baseCQs,
@@ -853,7 +853,7 @@ func TestFairPreemptions(t *testing.T) {
 			incoming: unitWl.Clone().Name("a1").Obj(),
 			targetCQ: "a",
 			wantPreempted: sets.New(
-				targetKeyReason("/b1", kueue.InCohortFairSharingReason),
+				targetKeyReason("/b1", kueue.InCohortReclamationReason),
 			),
 		},
 		"cohort with zero weight can reclaim nominal quota": {
