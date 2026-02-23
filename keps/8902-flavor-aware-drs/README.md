@@ -148,6 +148,8 @@ For example, a cluster may want to treat *GPUs* as premium/scarce while treating
 
 `AdmissionFairSharing.ResourceWeights` and `ResourceFlavor.spec.fairSharing.resourceWeights` share a similar name but are independent and operate at different levels. `AdmissionFairSharing.ResourceWeights` performs **cross-resource-type** weighting (for example, GPUs matter more than CPU) to order workloads across LocalQueues *within* a ClusterQueue based on historical usage. `ResourceFlavor.spec.fairSharing.resourceWeights` performs **cross-flavor** weighting *within* a resource type (for example, H100 GPUs matter more than A10 GPUs) to compute DRS, which affects both **admission ordering** of ClusterQueues across a cohort and **Fair Sharing preemption** decisions. The two are not multiplicative and do not interact: AdmissionFairSharing selects which workload each CQ puts forward, then DRS selects which CQ's workload gets admitted or preempted.
 
+Similarly, `ClusterQueue.spec.fairSharing.weight` is independent of flavor resource weights. The CQ weight divides the DRS ratio to produce the final weighted share used for comparisons, while flavor weights affect how the DRS ratio itself is computed. They operate at different layers and compose without interaction.
+
 ### Weighted borrowing and lendable
 
 Let:
@@ -277,12 +279,20 @@ Since `fairSharing.resourceWeights` is orthogonal to topology and node placement
   - multiple flavors for the same resource type with different weights
   - multi-resource workloads where only a subset of resources are weighted
   - backward compatibility (no weights => unchanged outcomes)
+  - hierarchical cohort where a CQ has a `borrowingLimit` and flavor weights are configured, verifying DRS accounts for both the capped borrowing and the weighted lendable
+  - setting the same weight across all flavors for a resource type produces the same ratio as no weights (weights cancel in the ratio)
+  - weights shift the dominant resource (e.g. from `cpu` to `nvidia.com/gpu`, as in Example A)
+  - flavor weights compose correctly with `ClusterQueue.spec.fairSharing.weight`
+- Validation tests:
+  - reject zero and negative weight values
+  - accept missing `fairSharing` / missing map entries (default 1.0)
 
 #### Integration tests
 
 - Add an integration/e2e scenario where two ClusterQueues (CQs) borrow the same number of GPUs from different flavors and verify:
   - admission ordering within the cohort prefers the CQ with lower *weighted* DRS
   - Fair Sharing preemption ordering matches the configured weights
+- User Story 1 scenario: a CQ borrowing many cheap-flavor GPUs has a lower weighted DRS than a CQ borrowing the same amount on a premium flavor
 
 ### Graduation Criteria
 
@@ -296,7 +306,10 @@ Since `fairSharing.resourceWeights` is orthogonal to topology and node placement
 #### Beta
 
 - Documentation includes configuration guidance and examples.
-- Integration test added for a few more representative examples.
+- Additional integration tests:
+  - multi-level hierarchical cohort where weighted DRS is compared at each level
+  - weight update on a ResourceFlavor is reflected in subsequent DRS computations and changes admission/preemption ordering
+  - `FairSharingStatus` reflects the weighted dominant resource after a weight-induced shift
 - Extend the `FairSharingStatus` type with `dominantResource` (and potentially per-flavor ratio details) to improve observability when flavor weights shift the dominant resource. This surfaces on both ClusterQueue and Cohort status, where DRS is computed and used for admission ordering and preemption.
 
 ## Implementation History
