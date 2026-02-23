@@ -347,7 +347,7 @@ func runFirstFsStrategy(preemptionCtx *preemptionCtx, candidates []*workload.Inf
 		}
 
 		if preemptorUnderNominal {
-			targets, fits = preemptCandidate(preemptionCtx, candCQ.PopWorkload(), candCQ, kueue.InCohortFairSharingReason, targets)
+			targets, fits = preemptCandidate(preemptionCtx, candCQ.PopWorkload(), candCQ, kueue.InCohortReclamationReason, targets)
 			if fits {
 				return true, targets, nil
 			}

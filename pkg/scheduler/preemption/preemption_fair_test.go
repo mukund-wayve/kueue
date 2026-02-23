@@ -937,7 +937,7 @@ func TestFairPreemptions(t *testing.T) {
 			},
 			incoming:      unitWl.Clone().Name("a_incoming").Obj(),
 			targetCQ:      "a",
-			wantPreempted: sets.New(targetKeyReason("/b_prem1", kueue.InCohortFairSharingReason)),
+			wantPreempted: sets.New(targetKeyReason("/b_prem1", kueue.InCohortReclamationReason)),
 		},
 	}
 	for name, tc := range cases {
