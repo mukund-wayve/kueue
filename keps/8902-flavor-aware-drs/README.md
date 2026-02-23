@@ -175,6 +175,8 @@ Then DRS uses the same “dominant resource” concept as today:
 - Compute $ratio(r) = weightedBorrowed(r) / weightedLendable(r)$ (if $w(f, r)$ is constant across all flavors $f$ for a given $r$, this reduces to $borrowed(r) / lendable(r)$)
 - Pick the resource $r$ with the maximum ratio as the dominant resource (alphabetical tie-break)
 
+In hierarchical cohorts, DRS is computed at each level via `PathParentToRoot()`. Since flavor weights are defined globally on the ResourceFlavor, they apply uniformly at all levels of the hierarchy.
+
 #### Effect on dominant resource selection
 
 Because weights change $ratio(r)$, they can change which resource has the maximum ratio and therefore becomes dominant. Since DRS comparisons use the dominant resource’s ratio, this can change behavior wherever DRS is used, including admission ordering and Fair Sharing preemption.
