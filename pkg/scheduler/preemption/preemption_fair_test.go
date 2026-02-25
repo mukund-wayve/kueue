@@ -916,6 +916,10 @@ func TestFairPreemptions(t *testing.T) {
 					Preemption(kueue.ClusterQueuePreemption{
 						ReclaimWithinCohort: kueue.PreemptionPolicyAny,
 					}).
+					FlavorFungibility(kueue.FlavorFungibility{
+						WhenCanBorrow:  kueue.MayStopSearch,
+						WhenCanPreempt: kueue.MayStopSearch,
+					}).
 					Obj(),
 				utiltestingapi.MakeClusterQueue("b").
 					Cohort("all").
