@@ -13,9 +13,11 @@
 - [Design Details](#design-details)
   - [API change](#api-change)
     - [Why not choose a single cost/weight per flavor instead of having different weights per resource?](#why-not-choose-a-single-costweight-per-flavor-instead-of-having-different-weights-per-resource)
+    - [Relationship with AdmissionFairSharing.ResourceWeights](#relationship-with-admissionfairsharingresourceweights)
   - [Weighted borrowing and lendable](#weighted-borrowing-and-lendable)
     - [Effect on dominant resource selection](#effect-on-dominant-resource-selection)
   - [Validation and defaults](#validation-and-defaults)
+  - [Interaction with Topology-Aware Scheduling (TAS)](#interaction-with-topology-aware-scheduling-tas)
   - [Backward compatibility](#backward-compatibility)
   - [Test Plan](#test-plan)
     - [Unit Tests](#unit-tests)
@@ -28,6 +30,7 @@
 - [Alternatives](#alternatives)
   - [Single weight per ResourceFlavor](#single-weight-per-resourceflavor)
   - [Weighting elsewhere (ClusterQueue, ResourceGroup)](#weighting-elsewhere-clusterqueue-resourcegroup)
+  - [Weighting in the Kueue Configuration (ConfigMap)](#weighting-in-the-kueue-configuration-configmap)
 <!-- /toc -->
 
 ## Summary
