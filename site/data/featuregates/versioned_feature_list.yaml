@@ -29,7 +29,7 @@
     lockToDefault: false
     preRelease: Alpha
     version: "0.15"
-- name: FairSharingPrioritizeNonBorrowing
+- name: FairSharingPreemptWithinNominal
   versionedSpecs:
   - default: true
     lockToDefault: false
