@@ -317,6 +317,9 @@ func parseStrategies(fs *config.FairSharing) []fairsharing.Strategy {
 func runFirstFsStrategy(preemptionCtx *preemptionCtx, candidates []*workload.Info, strategy fairsharing.Strategy) (bool, []*Target, []*workload.Info) {
 	ordering := fairsharing.MakeClusterQueueOrdering(preemptionCtx.preemptorCQ, candidates, preemptionCtx.log, preemptionCtx.clock)
 
+	var targets []*Target
+	var retryCandidates []*workload.Info
+
 	// If the preemptor CQ stays within nominal quota for the contested
 	// resources (including the incoming workload, already simulated),
 	// preemption is allowed regardless of DRS (nominal entitlement).
@@ -325,9 +328,6 @@ func runFirstFsStrategy(preemptionCtx *preemptionCtx, candidates []*workload.Inf
 	// and runSecondFsStrategy has nothing to do.
 	preemptorWithinNominal := features.Enabled(features.FairSharingPreemptWithinNominal) &&
 		queueWithinNominalInResourcesNeedingPreemption(preemptionCtx)
-
-	var targets []*Target
-	var retryCandidates []*workload.Info
 	for candCQ := range ordering.Iter() {
 		if candCQ.InClusterQueuePreemption() {
 			candWl := candCQ.PopWorkload()
@@ -569,7 +569,7 @@ func queueUnderNominalInResourcesNeedingPreemption(preemptionCtx *preemptionCtx)
 // that this treats usage exactly equal to nominal as "within nominal."
 func queueWithinNominalInResourcesNeedingPreemption(preemptionCtx *preemptionCtx) bool {
 	for fr := range preemptionCtx.frsNeedPreemption {
-		if preemptionCtx.preemptorCQ.ResourceNode.Usage[fr] > preemptionCtx.preemptorCQ.QuotaFor(fr).Nominal {
+		if preemptionCtx.preemptorCQ.Borrowing(fr) {
 			return false
 		}
 	}
