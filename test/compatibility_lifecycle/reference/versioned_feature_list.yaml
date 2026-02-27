@@ -40,7 +40,7 @@
   - default: true
     lockToDefault: false
     preRelease: Beta
-    version: "0.17"
+    version: "0.15"
 - name: FairSharingPrioritizeNonBorrowing
   versionedSpecs:
   - default: true
