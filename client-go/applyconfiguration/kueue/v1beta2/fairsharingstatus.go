@@ -31,6 +31,12 @@ type FairSharingStatusApplyConfiguration struct {
 	// weight of zero and is borrowing, this will return
 	// 9223372036854775807, the maximum possible share value.
 	WeightedShare *int64 `json:"weightedShare,omitempty"`
+	// historicalBorrowingStatus holds the decayed borrowing average used by the
+	// HistoricalBorrowing fair sharing strategy. It is managed by Kueue and only
+	// populated when the HistoricalBorrowingFairSharing feature gate is enabled and
+	// fairSharing.strategy is HistoricalBorrowing. It is persisted so the decayed
+	// average survives controller restarts and should not be edited by clients.
+	HistoricalBorrowingStatus *HistoricalBorrowingStatusApplyConfiguration `json:"historicalBorrowingStatus,omitempty"`
 }
 
 // FairSharingStatusApplyConfiguration constructs a declarative configuration of the FairSharingStatus type for use with
@@ -44,5 +50,13 @@ func FairSharingStatus() *FairSharingStatusApplyConfiguration {
 // If called multiple times, the WeightedShare field is set to the value of the last call.
 func (b *FairSharingStatusApplyConfiguration) WithWeightedShare(value int64) *FairSharingStatusApplyConfiguration {
 	b.WeightedShare = &value
+	return b
+}
+
+// WithHistoricalBorrowingStatus sets the HistoricalBorrowingStatus field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the HistoricalBorrowingStatus field is set to the value of the last call.
+func (b *FairSharingStatusApplyConfiguration) WithHistoricalBorrowingStatus(value *HistoricalBorrowingStatusApplyConfiguration) *FairSharingStatusApplyConfiguration {
+	b.HistoricalBorrowingStatus = value
 	return b
 }

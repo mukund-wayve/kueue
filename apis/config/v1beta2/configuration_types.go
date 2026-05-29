@@ -819,6 +819,63 @@ type FairSharing struct {
 	//
 	// Any other combination or ordering fails configuration validation.
 	PreemptionStrategies []PreemptionStrategy `json:"preemptionStrategies"`
+
+	// strategy selects what data feeds the dominant resource share (DRS) score
+	// used for cohort-level ordering and preemption.
+	// Possible values are:
+	// - Borrowing: the DRS score reflects only instantaneous borrowing, i.e. the
+	//   amount a ClusterQueue or Cohort currently uses above its nominal quota.
+	//   This is the default.
+	// - HistoricalBorrowing: the DRS score reflects a half-life decayed average of
+	//   past borrowing, so a ClusterQueue that borrowed recently keeps paying a
+	//   share penalty for a while after it stops. Requires the
+	//   HistoricalBorrowingFairSharing feature gate to be enabled and
+	//   historicalBorrowing to be set.
+	// +optional
+	Strategy DRSStrategy `json:"strategy,omitempty"`
+
+	// historicalBorrowing configures the half-life decay for cohort-level
+	// historical borrowing. It is required when strategy is HistoricalBorrowing and
+	// must be unset otherwise.
+	// +optional
+	HistoricalBorrowing *HistoricalBorrowingConfig `json:"historicalBorrowing,omitempty"`
+}
+
+// DRSStrategy selects the data source for the dominant resource share score.
+type DRSStrategy string
+
+const (
+	DRSStrategyBorrowing           DRSStrategy = "Borrowing"
+	DRSStrategyHistoricalBorrowing DRSStrategy = "HistoricalBorrowing"
+)
+
+type HistoricalBorrowingConfig struct {
+	// borrowingHalfLifeTime is the time after which a past borrowing sample
+	// contributes half as much to the decayed borrowing average. Larger values
+	// make the share penalty fade more slowly after borrowing stops.
+	// Must be greater than zero. Required when strategy is HistoricalBorrowing.
+	BorrowingHalfLifeTime metav1.Duration `json:"borrowingHalfLifeTime"`
+
+	// borrowingSamplingInterval is how often the controller samples current
+	// borrowing and folds it into the decayed borrowing average.
+	// Must be greater than zero. Required when strategy is HistoricalBorrowing.
+	BorrowingSamplingInterval metav1.Duration `json:"borrowingSamplingInterval"`
+
+	// borrowingHistoryWeight (k) controls how strongly past borrowing influences
+	// the dominant resource share relative to instantaneous borrowing. The
+	// effective borrowing used for the DRS score is
+	// currentBorrowing + borrowingHistoryWeight*decayedBorrowing.
+	// A higher value makes a ClusterQueue that borrowed recently yield harder to
+	// others, so light or new borrowers catch up faster; 0 disables the
+	// historical contribution entirely (equivalent to the Borrowing strategy).
+	// For example, take a CQ that has stopped borrowing but whose decayed
+	// borrowing average is still H: k=1 scores it as if it were borrowing H now,
+	// k=4 as if 4*H, and k=9 as if 9*H. So at equal current borrowing, raising k
+	// deprioritizes a past borrower more strongly (k=9 ~9x the residual penalty
+	// of k=1) and lets others catch up proportionally faster.
+	// Must be greater than or equal to zero. Defaults to 1.
+	// +optional
+	BorrowingHistoryWeight *float64 `json:"borrowingHistoryWeight,omitempty"`
 }
 
 type AdmissionFairSharing struct {

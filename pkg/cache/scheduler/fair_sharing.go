@@ -48,11 +48,13 @@ type DRS struct {
 	fairWeight       float64
 	unweightedRatio  float64
 	dominantResource corev1.ResourceName
-	// borrowing tracks whether the node's current usage
-	// exceeds its quota for any resource.
+	// borrowing tracks whether the node is borrowing on any resource. With the
+	// HistoricalBorrowing strategy this includes remembered borrowing, so it can
+	// be true even when current usage is below quota.
 	borrowing bool
-	// borrowedFRs records which FlavorResources the node is
-	// currently borrowing on.
+	// borrowedFRs records which FlavorResources the node is considered to borrow
+	// on. With the HistoricalBorrowing strategy, when remembered borrowing drives
+	// the score for a resource, every flavor of that resource is listed.
 	borrowedFRs []resources.FlavorResource
 }
 
@@ -63,12 +65,16 @@ func NegativeDRS() DRS {
 
 // IsZero returns whether the DRS unweighted ratio is 0, which is also the
 // case for a node borrowing only what its Cohort has nothing lendable for.
+// Under the HistoricalBorrowing strategy the unweighted ratio also accounts for
+// remembered borrowing, so IsZero can be false even when current usage is below
+// quota.
 func (d DRS) IsZero() bool {
 	return d.unweightedRatio == 0
 }
 
-// IsBorrowing returns whether the node's current usage exceeds
-// its quota for any resource.
+// IsBorrowing returns whether the node is borrowing on any resource. Under the
+// HistoricalBorrowing strategy this includes remembered borrowing, so it can be
+// true even when the node's current usage is below its quota.
 func (d DRS) IsBorrowing() bool {
 	return d.borrowing
 }
@@ -174,6 +180,10 @@ func dominantResourceShare(node dominantResourceShareNode, wlReq resources.Flavo
 			borrowedFRs = append(borrowedFRs, fr)
 		}
 	}
+	// Under the HistoricalBorrowing strategy, fold remembered borrowing into the
+	// instantaneous result before the no-borrowing short-circuit, so a node that
+	// borrowed recently still scores as borrowing. No-op otherwise.
+	borrowedFRs = applyHistoricalBorrowing(node, wlReq, borrowing, borrowedFRs)
 	if len(borrowing) == 0 {
 		return drs
 	}

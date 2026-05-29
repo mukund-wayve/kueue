@@ -191,6 +191,7 @@ type Cache struct {
 	lqMetrics    *metrics.LocalQueueMetricsConfig
 
 	simulatorFactory simulator.Factory
+	hb               historicalBorrowingState
 }
 
 func New(client client.Client, options ...Option) *Cache {
@@ -659,6 +660,7 @@ func (c *Cache) DeleteClusterQueue(cq *kueue.ClusterQueue) {
 	parent := curCq.Parent()
 
 	c.hm.DeleteClusterQueue(cqName)
+	c.clearHistoricalBorrowingSeededLocked("cq", string(cqName))
 	metrics.ClearCacheMetrics(cq.Name)
 	if features.Enabled(features.MetricsForCohorts) {
 		metrics.ClearClusterQueueInfo(cqName)
@@ -718,6 +720,7 @@ func (c *Cache) DeleteCohort(cohortName kueue.CohortReference) {
 	}
 
 	c.hm.DeleteCohort(cohortName)
+	c.clearHistoricalBorrowingSeededLocked("cohort", string(cohortName))
 
 	// If the cohort still exists after deletion, it means
 	// that it has one or more children referencing it.

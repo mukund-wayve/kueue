@@ -34,6 +34,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/component-base/featuregate"
+	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
 	"sigs.k8s.io/kueue/pkg/controller/jobs"
@@ -1032,6 +1033,146 @@ func TestValidate(t *testing.T) {
 				Integrations: defaultIntegrations,
 				FairSharing: &configapi.FairSharing{
 					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanOrEqualToFinalShare, configapi.LessThanInitialShare},
+				},
+			},
+		},
+		"valid historical borrowing strategy": {
+			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
+						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
+						BorrowingSamplingInterval: metav1.Duration{Duration: time.Minute},
+					},
+				},
+			},
+		},
+		"historical borrowing strategy forbidden when feature gate is disabled": {
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
+						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
+						BorrowingSamplingInterval: metav1.Duration{Duration: time.Minute},
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: "fairSharing.strategy",
+				},
+			},
+		},
+		"historical borrowing strategy requires historicalBorrowing config": {
+			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "fairSharing.historicalBorrowing",
+				},
+			},
+		},
+		"unsupported fair sharing strategy": {
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategy("Bogus"),
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeNotSupported,
+					Field: "fairSharing.strategy",
+				},
+			},
+		},
+		"historical borrowing config forbidden with Borrowing strategy": {
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyBorrowing,
+					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
+						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
+						BorrowingSamplingInterval: metav1.Duration{Duration: time.Minute},
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeForbidden,
+					Field: "fairSharing.historicalBorrowing",
+				},
+			},
+		},
+		"historical borrowing requires explicit half life and sampling interval": {
+			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+					HistoricalBorrowing:  &configapi.HistoricalBorrowingConfig{},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "fairSharing.historicalBorrowing.borrowingHalfLifeTime",
+				},
+				&field.Error{
+					Type:  field.ErrorTypeRequired,
+					Field: "fairSharing.historicalBorrowing.borrowingSamplingInterval",
+				},
+			},
+		},
+		"valid historical borrowing with explicit borrowingHistoryWeight": {
+			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
+						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
+						BorrowingSamplingInterval: metav1.Duration{Duration: time.Minute},
+						BorrowingHistoryWeight:    ptr.To(0.0),
+					},
+				},
+			},
+		},
+		"historical borrowing rejects negative borrowingHistoryWeight": {
+			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
+						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
+						BorrowingSamplingInterval: metav1.Duration{Duration: time.Minute},
+						BorrowingHistoryWeight:    ptr.To(-1.0),
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "fairSharing.historicalBorrowing.borrowingHistoryWeight",
 				},
 			},
 		},

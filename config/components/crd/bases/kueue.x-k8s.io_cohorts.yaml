@@ -428,6 +428,36 @@ spec:
                   when participating in Fair Sharing.
                   The is recorded only when Fair Sharing is enabled in the Kueue configuration.
                 properties:
+                  historicalBorrowingStatus:
+                    description: |-
+                      historicalBorrowingStatus holds the decayed borrowing average used by the
+                      HistoricalBorrowing fair sharing strategy. It is managed by Kueue and only
+                      populated when the HistoricalBorrowingFairSharing feature gate is enabled and
+                      fairSharing.strategy is HistoricalBorrowing. It is persisted so the decayed
+                      average survives controller restarts and should not be edited by clients.
+                    properties:
+                      borrowedResources:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          borrowedResources is the decayed borrowing average per resource name, in the
+                          same units as the resource's quota.
+                        type: object
+                      lastUpdate:
+                        description: |-
+                          lastUpdate is the time borrowedResources was last sampled. It is used to
+                          apply decay for the elapsed time since the previous sample, including time
+                          the controller was not running.
+                        format: date-time
+                        type: string
+                    required:
+                    - borrowedResources
+                    - lastUpdate
+                    type: object
                   weightedShare:
                     description: |-
                       weightedShare represents the maximum of the ratios of usage

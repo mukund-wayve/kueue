@@ -144,6 +144,12 @@ const (
 	// Enable admission fair sharing
 	AdmissionFairSharing featuregate.Feature = "AdmissionFairSharing"
 
+	// owner: @mukund
+	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/9734-historical-usage-fair-sharing
+	//
+	// Enable historical borrowing for cohort-level fair sharing DRS.
+	HistoricalBorrowingFairSharing featuregate.Feature = "HistoricalBorrowingFairSharing"
+
 	// owner: @apullo777
 	// kep: https://github.com/kubernetes-sigs/kueue/tree/main/keps/4136-admission-fair-sharing
 	//
@@ -982,6 +988,9 @@ var defaultVersionedFeatureGates = map[featuregate.Feature]featuregate.Versioned
 	},
 	AdmissionFairSharingAnchorAtQuotaReservation: {
 		{Version: version.MustParse("0.20"), Default: true, PreRelease: featuregate.Beta},
+	},
+	HistoricalBorrowingFairSharing: {
+		{Version: version.MustParse("0.17"), Default: false, PreRelease: featuregate.Alpha},
 	},
 	TASFailedNodeReplacement: {
 		{Version: version.MustParse("0.12"), Default: false, PreRelease: featuregate.Alpha},
