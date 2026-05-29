@@ -1,15 +1,13 @@
-title: Cross-ClusterQueue Minimum Admit Duration
+title: Preemption Protection — Guaranteed Minimum Runtime
 kep-number: 9876
 authors:
-  - "@mukund-wayve"
+  - "@michaelvlach"
 status: provisional
 creation-date: 2026-03-15
 reviewers:
-  - "@sohankunkerkar"
   - "@tenzen-y"
   - "@mimowo"
 approvers:
-  - "@sohankunkerkar"
   - "@tenzen-y"
   - "@mimowo"
 
@@ -23,18 +21,18 @@ stage: alpha
 # The most recent milestone for which work toward delivery of this KEP has been
 # done. This can be the current (upcoming) milestone, if it is being actively
 # worked on.
-latest-milestone: "v0.17"
+latest-milestone: "v0.18"
 
 # The milestone at which this feature was, or is targeted to be, at each stage.
 milestone:
-  alpha: "v0.17"
-  beta: "v0.18"
-  stable: "v0.20"
+  alpha: "v0.18"
+  beta: "v0.19"
+  stable: "v0.21"
 
 # The following PRR answers are required at alpha release
 # List the feature gate name and the components for which it must be enabled
 feature-gates:
-  - name: CrossCQMinAdmitDuration
+  - name: PreemptionProtection
 
 disable-supported: true
 
