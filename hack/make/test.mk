@@ -305,6 +305,14 @@ test-e2e-extended-shard-2: setup-e2e-env run-test-e2e-extended-$(E2E_KIND_VERSIO
 test-e2e-baseline: E2E_NPROCS := 4
 test-e2e-baseline: setup-e2e-env kueuectl run-test-e2e-baseline-$(E2E_KIND_VERSION:kindest/node:v%=%) ## Run the baseline e2e test suite on a kind cluster.
 
+# Historical Borrowing visualization demo. Builds the current branch into the
+# Kueue image (kind-image-build), brings up a kind cluster configured for the
+# HistoricalBorrowing fair sharing strategy, drives two ClusterQueues with real
+# sleep(2-5s) Jobs, and writes historical-borrowing-viz.html under ARTIFACTS.
+.PHONY: test-e2e-hb-viz
+test-e2e-hb-viz: GINKGO_ARGS = --timeout=2h
+test-e2e-hb-viz: kind-image-build setup-e2e-env run-test-e2e-hb-viz-$(E2E_KIND_VERSION:kindest/node:v%=%) ## Run the historical borrowing visualization demo (writes an HTML chart to ARTIFACTS).
+
 .PHONY: test-tas-e2e-baseline
 test-tas-e2e-baseline: setup-e2e-env run-test-tas-e2e-baseline-$(E2E_KIND_VERSION:kindest/node:v%=%) ## Run the baseline Topology-Aware Scheduling (TAS) e2e test suite.
 
@@ -480,6 +488,21 @@ run-test-e2e-baseline-%:
 		KIND_CLUSTER_FILE="kind-cluster.yaml" E2E_TARGET_FOLDER="singlecluster/baseline" \
 		E2E_CONFIG_FOLDER="baseline" \
 		TEST_LOG_LEVEL=$(TEST_LOG_LEVEL) \
+		E2E_USE_HELM=$(E2E_USE_HELM) \
+		./hack/testing/e2e-test.sh
+
+run-test-e2e-hb-viz-%: K8S_VERSION = $(@:run-test-e2e-hb-viz-%=%)
+run-test-e2e-hb-viz-%:
+	@echo Running historical borrowing viz e2e for k8s ${K8S_VERSION}
+	E2E_KIND_VERSION="kindest/node:v$(K8S_VERSION)" KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) \
+		ARTIFACTS="$(ARTIFACTS)/$@" IMAGE_TAG=$(IMAGE_TAG) GINKGO_ARGS="$(E2E_GINKGO_ARGS)" \
+		E2E_MODE=$(E2E_MODE) \
+		E2E_SKIP_REINSTALL=$(E2E_SKIP_REINSTALL) \
+		E2E_ENFORCE_OPERATOR_UPDATE=$(E2E_ENFORCE_OPERATOR_UPDATE) \
+		KIND_CLUSTER_FILE="kind-cluster.yaml" E2E_TARGET_FOLDER="singlecluster/historicalborrowing" \
+		E2E_CONFIG_FOLDER="historicalborrowing" \
+		TEST_LOG_LEVEL=$(TEST_LOG_LEVEL) \
+		E2E_RUN_ONLY_ENV=$(E2E_RUN_ONLY_ENV) \
 		E2E_USE_HELM=$(E2E_USE_HELM) \
 		./hack/testing/e2e-test.sh
 
