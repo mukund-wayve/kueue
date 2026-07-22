@@ -54,6 +54,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/admissioncheck"
 	"sigs.k8s.io/kueue/pkg/util/api"
 	utilmaps "sigs.k8s.io/kueue/pkg/util/maps"
+	"sigs.k8s.io/kueue/pkg/util/logicaltas"
 	"sigs.k8s.io/kueue/pkg/util/roletracker"
 	"sigs.k8s.io/kueue/pkg/workload"
 	workloadevict "sigs.k8s.io/kueue/pkg/workload/evict"
@@ -841,6 +842,12 @@ func nominatedClusterSetsEqual(stored, current []string) bool {
 func (w *wlReconciler) nominateAndSynchronizeWorkers(ctx context.Context, group *wlGroup) (reconcile.Result, error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("op", "nominateAndSynchronizeWorkers")
 	log.V(3).Info("Nominate and Synchronize Worker Clusters")
+
+	if logicaltas.Enabled() {
+		if res, handled, err := w.logicalTASNominate(ctx, group); handled {
+			return res, err
+		}
+	}
 
 	componentWorkloads, err := w.listComponentWorkloads(ctx, group.local)
 	if err != nil {

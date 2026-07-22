@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Logical TAS spike overlay (non-production). Injects KUEUE_LOGICAL_TAS_SPIKE=true
+# on the manager container.
+resources:
+- ../../default
+
+patches:
+- path: manager_spike_patch.yaml
+
+configMapGenerator:
+- behavior: merge
+  files:
+  - controller_manager_config.yaml
+  name: kueue-manager-config
+  namespace: kueue-system

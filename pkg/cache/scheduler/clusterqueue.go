@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/resources"
 	"sigs.k8s.io/kueue/pkg/util/admissioncheck"
 	"sigs.k8s.io/kueue/pkg/util/api"
+	"sigs.k8s.io/kueue/pkg/util/logicaltas"
 	utilmath "sigs.k8s.io/kueue/pkg/util/math"
 	"sigs.k8s.io/kueue/pkg/util/queue"
 	"sigs.k8s.io/kueue/pkg/util/roletracker"
@@ -360,7 +361,7 @@ func (c *clusterQueue) isTASViolated() bool {
 		return false
 	}
 	// Skip TAS cache validation when MultiKueue is enabled; topology runs on worker clusters.
-	if c.hasMultiKueueAdmissionCheck() {
+	if c.hasMultiKueueAdmissionCheck() && !logicaltas.Enabled() {
 		return false
 	}
 	if !c.isTASInitialized() {

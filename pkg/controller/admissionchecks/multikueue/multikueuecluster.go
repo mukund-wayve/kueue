@@ -64,9 +64,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+	schdcache "sigs.k8s.io/kueue/pkg/cache/scheduler"
 	"sigs.k8s.io/kueue/pkg/controller/core/indexer"
 	"sigs.k8s.io/kueue/pkg/controller/jobframework"
 	"sigs.k8s.io/kueue/pkg/features"
+	"sigs.k8s.io/kueue/pkg/util/logicaltas"
 	"sigs.k8s.io/kueue/pkg/util/roletracker"
 	utilwait "sigs.k8s.io/kueue/pkg/util/wait"
 )
@@ -127,6 +129,10 @@ type remoteClient struct {
 	config       *clientConfig
 	origin       string
 	adapters     map[string]jobframework.MultiKueueAdapter
+
+	// schedulerCache is the manager's scheduler cache. When set (Logical TAS
+	// spike), a fake Node per worker cluster is synced into its TAS cache.
+	schedulerCache *schdcache.Cache
 
 	connState connectionState
 
@@ -209,16 +215,18 @@ func newRemoteClient(
 	cqUpdateCh chan<- event.TypedGenericEvent[kueue.ClusterQueueReference],
 	origin, clusterName string,
 	adapters map[string]jobframework.MultiKueueAdapter,
+	schedulerCache *schdcache.Cache,
 ) *remoteClient {
 	rc := &remoteClient{
-		clusterName:  clusterName,
-		wlUpdateCh:   wlUpdateCh,
-		watchEndedCh: watchEndedCh,
-		cqUpdateCh:   cqUpdateCh,
-		localClient:  localClient,
-		origin:       origin,
-		adapters:     adapters,
-		clock:        clock.RealClock{},
+		clusterName:    clusterName,
+		wlUpdateCh:     wlUpdateCh,
+		watchEndedCh:   watchEndedCh,
+		cqUpdateCh:     cqUpdateCh,
+		localClient:    localClient,
+		origin:         origin,
+		adapters:       adapters,
+		schedulerCache: schedulerCache,
+		clock:          clock.RealClock{},
 	}
 	// Start in the disconnected state, tracking the loss from creation. If the worker is
 	// unreachable when the client is created (e.g. the reserving worker is down right after a
@@ -240,7 +248,7 @@ func newClientWithWatch(ctx context.Context, config *clientConfig, options clien
 		return nil, err
 	}
 
-	if !features.Enabled(features.MultiKueueManagerQuotaAutomation) {
+	if !features.Enabled(features.MultiKueueManagerQuotaAutomation) && !logicaltas.Enabled() {
 		return NewNeverCachingClient(directClient), nil
 	}
 
@@ -354,12 +362,15 @@ func (rc *remoteClient) updateConfigAndRefreshWatchers(watchCtx context.Context,
 			return rc.increaseFailedConnAttempt(), err
 		}
 	}
-	if features.Enabled(features.MultiKueueManagerQuotaAutomation) {
+	if features.Enabled(features.MultiKueueManagerQuotaAutomation) || logicaltas.Enabled() {
 		err = rc.startQueueWatchers(watchCtx)
 		if err != nil {
 			rc.disconnect()
 			return rc.increaseFailedConnAttempt(), err
 		}
+	}
+	if logicaltas.Enabled() && rc.schedulerCache != nil {
+		rc.syncLogicalTASFakeNode(watchCtx)
 	}
 
 	rc.connState.markConnected()
@@ -466,20 +477,42 @@ func (rc *remoteClient) startWatcher(ctx context.Context, kind string, w jobfram
 func (rc *remoteClient) startQueueWatchers(ctx context.Context) error {
 	_, err := rc.client.AddCacheEventHandler(ctx, &kueue.ClusterQueue{}, cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
-			if cq, ok := obj.(*kueue.ClusterQueue); ok {
+			cq, ok := obj.(*kueue.ClusterQueue)
+			if !ok {
+				return
+			}
+			if features.Enabled(features.MultiKueueManagerQuotaAutomation) {
 				rc.queueEventsForCQ(ctx, cq)
+			}
+			if logicaltas.Enabled() && rc.schedulerCache != nil {
+				rc.syncLogicalTASFakeNode(ctx)
 			}
 		},
 		UpdateFunc: func(oldObj, newObj any) {
 			oldCQ, ok1 := oldObj.(*kueue.ClusterQueue)
 			newCQ, ok2 := newObj.(*kueue.ClusterQueue)
-			if ok1 && ok2 && !equality.Semantic.DeepEqual(oldCQ.Spec.ResourceGroups, newCQ.Spec.ResourceGroups) {
+			if !ok1 || !ok2 {
+				return
+			}
+			specChanged := !equality.Semantic.DeepEqual(oldCQ.Spec.ResourceGroups, newCQ.Spec.ResourceGroups)
+			usageChanged := !equality.Semantic.DeepEqual(oldCQ.Status.FlavorsUsage, newCQ.Status.FlavorsUsage)
+			if features.Enabled(features.MultiKueueManagerQuotaAutomation) && specChanged {
 				rc.queueEventsForCQ(ctx, newCQ)
+			}
+			if logicaltas.Enabled() && rc.schedulerCache != nil && (specChanged || usageChanged) {
+				rc.syncLogicalTASFakeNode(ctx)
 			}
 		},
 		DeleteFunc: func(obj any) {
-			if cq, err := deletedObjectState[*kueue.ClusterQueue](obj); err == nil {
+			cq, err := deletedObjectState[*kueue.ClusterQueue](obj)
+			if err != nil {
+				return
+			}
+			if features.Enabled(features.MultiKueueManagerQuotaAutomation) {
 				rc.queueEventsForCQ(ctx, cq)
+			}
+			if logicaltas.Enabled() && rc.schedulerCache != nil {
+				rc.syncLogicalTASFakeNode(ctx)
 			}
 		},
 	})
@@ -583,6 +616,9 @@ func (rc *remoteClient) StopWatchers() {
 // workload reconciler to detect that the cluster was previously available but
 // is now unreachable, and apply the workerLostTimeout delay before requeuing.
 func (rc *remoteClient) disconnect() {
+	if logicaltas.Enabled() && rc.schedulerCache != nil {
+		rc.schedulerCache.TASCache().DeleteNodeByName(rc.clusterName)
+	}
 	rc.StopWatchers()
 	rc.connState.markDisconnected(rc.clock.Now())
 }
@@ -711,6 +747,8 @@ type clustersReconciler struct {
 
 	logName     string
 	roleTracker *roletracker.RoleTracker
+
+	schedulerCache *schdcache.Cache
 }
 
 type clusterProfileAccessProvider interface {
@@ -764,7 +802,7 @@ func (c *clustersReconciler) findOrCreateRemoteClient(clusterName, origin string
 
 	client, found := c.remoteClients[clusterName]
 	if !found {
-		client = newRemoteClient(c.localClient, c.wlUpdateCh, c.watchEndedCh, c.cqUpdateCh, origin, clusterName, c.adapters)
+		client = newRemoteClient(c.localClient, c.wlUpdateCh, c.watchEndedCh, c.cqUpdateCh, origin, clusterName, c.adapters, c.schedulerCache)
 		if c.builderOverride != nil {
 			client.builderOverride = c.builderOverride
 		}
@@ -1139,6 +1177,7 @@ func newClustersReconciler(
 	cpAccessProvider clusterProfileAccessProvider,
 	roleTracker *roletracker.RoleTracker,
 	recorder events.EventRecorder,
+	schedulerCache *schdcache.Cache,
 ) *clustersReconciler {
 	return &clustersReconciler{
 		localClient:                  c,
@@ -1156,6 +1195,7 @@ func newClustersReconciler(
 		clusterProfileAccessProvider: cpAccessProvider,
 		logName:                      "multikueuecluster-reconciler",
 		roleTracker:                  roleTracker,
+		schedulerCache:               schedulerCache,
 	}
 }
 
