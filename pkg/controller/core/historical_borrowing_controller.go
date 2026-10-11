@@ -44,16 +44,19 @@ type historicalBorrowingReconciler[T client.Object] struct {
 	newObj         func() T
 	fairSharing    func(T) *kueue.FairSharingStatus
 	setFairSharing func(T, *kueue.FairSharingStatus)
-	ensureSeeded   func(*schdcache.Cache, string, *kueue.HistoricalBorrowingStatus)
-	sample         func(*schdcache.Cache, string, time.Duration) (*kueue.HistoricalBorrowingStatus, bool)
+	ensureSeeded   func(*schdcache.Cache, string, *kueue.HistoricalBorrowingStatus, time.Time)
+	sample         func(*schdcache.Cache, string, time.Time) (*kueue.HistoricalBorrowingStatus, time.Duration, bool)
 }
 
 // Reconcile runs one sampling tick for a ClusterQueue or Cohort:
 //  1. Seed the in-memory history from the object's saved status (once).
-//  2. If less than one sampling interval has passed since the last update,
-//     requeue for the remaining time and do nothing else.
+//  2. If less than one sampling interval has passed since the last in-memory
+//     sample, requeue for the remaining time and do nothing else.
 //  3. Otherwise take a new EMA sample and write it back to the object's status,
 //     then requeue for the next interval.
+//
+// The in-memory EMA is authoritative: if the status write fails, the persisted
+// status lags by one interval and the next tick writes the current value.
 //
 // It is a no-op while historical borrowing is disabled.
 func (r *historicalBorrowingReconciler[T]) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
@@ -71,28 +74,19 @@ func (r *historicalBorrowingReconciler[T]) Reconcile(ctx context.Context, req re
 	if fs := r.fairSharing(obj); fs != nil {
 		histStatus = fs.HistoricalBorrowingStatus
 	}
-	r.ensureSeeded(r.cache, obj.GetName(), histStatus)
+	now := r.clock.Now()
+	r.ensureSeeded(r.cache, obj.GetName(), histStatus, now)
 
-	elapsed := interval
-	if histStatus != nil && !histStatus.LastUpdate.IsZero() {
-		elapsed = r.clock.Now().Sub(histStatus.LastUpdate.Time)
-	}
-	// Guard against a LastUpdate in the future (clock skew), which would yield a
-	// negative alpha and move the EMA the wrong way.
-	if elapsed < 0 {
-		elapsed = 0
-	}
-	if elapsed < interval {
-		return reconcile.Result{RequeueAfter: interval - elapsed}, nil
-	}
-
-	newStatus, found := r.sample(r.cache, obj.GetName(), elapsed)
+	newStatus, wait, found := r.sample(r.cache, obj.GetName(), now)
 	if !found {
 		// The node is not in the scheduler cache yet (e.g. shortly after a
 		// restart, before the ClusterQueue/Cohort has been added). Requeue
 		// without touching the persisted status, so a saved EMA is not wiped and
 		// is restored via seeding once the node appears.
 		return reconcile.Result{RequeueAfter: interval}, nil
+	}
+	if wait > 0 {
+		return reconcile.Result{RequeueAfter: wait}, nil
 	}
 
 	fs := r.fairSharing(obj)
@@ -137,11 +131,11 @@ func newHistoricalBorrowingCQReconciler(c client.Client, cache *schdcache.Cache,
 		setFairSharing: func(cq *kueue.ClusterQueue, fs *kueue.FairSharingStatus) {
 			cq.Status.FairSharing = fs
 		},
-		ensureSeeded: func(cc *schdcache.Cache, name string, status *kueue.HistoricalBorrowingStatus) {
-			cc.EnsureCQHistoricalBorrowingSeeded(kueue.ClusterQueueReference(name), status)
+		ensureSeeded: func(cc *schdcache.Cache, name string, status *kueue.HistoricalBorrowingStatus, now time.Time) {
+			cc.EnsureCQHistoricalBorrowingSeeded(kueue.ClusterQueueReference(name), status, now)
 		},
-		sample: func(cc *schdcache.Cache, name string, elapsed time.Duration) (*kueue.HistoricalBorrowingStatus, bool) {
-			return cc.SampleCQHistoricalBorrowing(kueue.ClusterQueueReference(name), elapsed)
+		sample: func(cc *schdcache.Cache, name string, now time.Time) (*kueue.HistoricalBorrowingStatus, time.Duration, bool) {
+			return cc.SampleCQHistoricalBorrowing(kueue.ClusterQueueReference(name), now)
 		},
 	}
 }
@@ -159,11 +153,11 @@ func newHistoricalBorrowingCohortReconciler(c client.Client, cache *schdcache.Ca
 		setFairSharing: func(cohort *kueue.Cohort, fs *kueue.FairSharingStatus) {
 			cohort.Status.FairSharing = fs
 		},
-		ensureSeeded: func(cc *schdcache.Cache, name string, status *kueue.HistoricalBorrowingStatus) {
-			cc.EnsureCohortHistoricalBorrowingSeeded(kueue.CohortReference(name), status)
+		ensureSeeded: func(cc *schdcache.Cache, name string, status *kueue.HistoricalBorrowingStatus, now time.Time) {
+			cc.EnsureCohortHistoricalBorrowingSeeded(kueue.CohortReference(name), status, now)
 		},
-		sample: func(cc *schdcache.Cache, name string, elapsed time.Duration) (*kueue.HistoricalBorrowingStatus, bool) {
-			return cc.SampleCohortHistoricalBorrowing(kueue.CohortReference(name), elapsed)
+		sample: func(cc *schdcache.Cache, name string, now time.Time) (*kueue.HistoricalBorrowingStatus, time.Duration, bool) {
+			return cc.SampleCohortHistoricalBorrowing(kueue.CohortReference(name), now)
 		},
 	}
 }

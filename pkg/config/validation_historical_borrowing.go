@@ -17,6 +17,8 @@ limitations under the License.
 package config
 
 import (
+	"math"
+
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
@@ -56,9 +58,9 @@ func validateFairSharingStrategy(fs *configapi.FairSharing) field.ErrorList {
 				allErrs = append(allErrs, field.Required(fsHistoricalBorrowingPath.Child("borrowingSamplingInterval"),
 					"required when strategy is HistoricalBorrowing"))
 			}
-			if hb.BorrowingHistoryWeight != nil && *hb.BorrowingHistoryWeight < 0 {
+			if k := hb.BorrowingHistoryWeight; k != nil && (*k < 0 || math.IsNaN(*k) || math.IsInf(*k, 0)) {
 				allErrs = append(allErrs, field.Invalid(fsHistoricalBorrowingPath.Child("borrowingHistoryWeight"),
-					*hb.BorrowingHistoryWeight, "must be greater than or equal to zero"))
+					*k, "must be a finite number greater than or equal to zero"))
 			}
 		}
 	default:

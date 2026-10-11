@@ -48,6 +48,30 @@ func amountI64(a resources.Amount) int64 {
 	return v
 }
 
+// cpuHistory returns the node's remembered cpu borrowing, in milliCPU.
+func cpuHistory(rn resourceNode) float64 {
+	return rn.HistoricalBorrowing[corev1.ResourceCPU]
+}
+
+// sampleCQAfter samples the CQ as if elapsed had passed since its previous
+// sample, by backdating the in-memory sampling clock.
+func sampleCQAfter(c *Cache, name kueue.ClusterQueueReference, elapsed time.Duration) (*kueue.HistoricalBorrowingStatus, bool) {
+	now := time.Now()
+	c.initHistoricalBorrowingLastSampleLocked()
+	c.hb.lastSample[historicalSeededKey("cq", string(name))] = now.Add(-elapsed)
+	status, _, found := c.SampleCQHistoricalBorrowing(name, now)
+	return status, found
+}
+
+// sampleCohortAfter is sampleCQAfter for a Cohort.
+func sampleCohortAfter(c *Cache, name kueue.CohortReference, elapsed time.Duration) (*kueue.HistoricalBorrowingStatus, bool) {
+	now := time.Now()
+	c.initHistoricalBorrowingLastSampleLocked()
+	c.hb.lastSample[historicalSeededKey("cohort", string(name))] = now.Add(-elapsed)
+	status, _, found := c.SampleCohortHistoricalBorrowing(name, now)
+	return status, found
+}
+
 func historicalBorrowingCfg() *configapi.HistoricalBorrowingConfig {
 	return &configapi.HistoricalBorrowingConfig{
 		BorrowingHalfLifeTime:     metav1.Duration{Duration: halfLife},
@@ -173,6 +197,35 @@ func newCatchupCache(t *testing.T, cfg *configapi.HistoricalBorrowingConfig, wA,
 		cqSpec{name: "cqA", nominal: "0", weight: wA}, cqSpec{name: "cqB", nominal: "0", weight: wB})
 }
 
+const hbGPU = corev1.ResourceName("example.com/gpu")
+
+var hbGPUFR = resources.FlavorResource{Flavor: "default", Resource: hbGPU}
+
+// newGPUCache returns a cache with one CQ ("cq", nominal 0 GPUs, so all its
+// usage is borrowed) in one Cohort ("cohort", nominal 8 GPUs). GPUs are
+// accounted in whole units, unlike milliCPU.
+func newGPUCache(t *testing.T, cfg *configapi.HistoricalBorrowingConfig) *Cache {
+	t.Helper()
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.HistoricalBorrowingFairSharing, true)
+
+	ctx, log := utiltesting.ContextWithLog(t)
+	gpuQuotas := func(nominal string) kueue.FlavorQuotas {
+		return *utiltestingapi.MakeFlavorQuotas("default").
+			ResourceQuotaWrapper(hbGPU).NominalQuota(nominal).Append().
+			Obj()
+	}
+	cache := New(utiltesting.NewFakeClient(), WithFairSharing(true), WithHistoricalBorrowing(cfg))
+	cache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("default").Obj())
+	if err := cache.AddOrUpdateCohort(utiltestingapi.MakeCohort("cohort").ResourceGroup(gpuQuotas("8")).Obj()); err != nil {
+		t.Fatalf("AddOrUpdateCohort: %v", err)
+	}
+	cq := utiltestingapi.MakeClusterQueue("cq").ResourceGroup(gpuQuotas("0")).Cohort("cohort").Obj()
+	if err := cache.AddClusterQueue(ctx, cq); err != nil {
+		t.Fatalf("AddClusterQueue: %v", err)
+	}
+	return cache
+}
+
 // newTwoFlavorCache returns a cache with a single CQ providing cpu on two
 // flavors (f1, f2), used to exercise per-resource aggregation.
 func newTwoFlavorCache(t *testing.T) *Cache {
@@ -219,7 +272,7 @@ func newTwoFlavorCache(t *testing.T) *Cache {
 // for a known history at a chosen k.
 func seedCPUHistoryK(rn *resourceNode, amount resources.Amount, k float64) {
 	ensureHistoricalBorrowingMap(rn)
-	rn.HistoricalBorrowing[corev1.ResourceCPU] = amount
+	rn.HistoricalBorrowing[corev1.ResourceCPU] = amountFloat64(amount)
 	rn.BorrowingHistoryWeight = k
 }
 
@@ -235,7 +288,7 @@ func seedCPUHistory(rn *resourceNode, amount resources.Amount) {
 func rememberCPUBorrowing(cache *Cache, name kueue.ClusterQueueReference) *clusterQueue {
 	cq := cache.hm.ClusterQueue(name)
 	addUsage(cq, cpuFR, cpuCores(10))
-	cache.SampleCQHistoricalBorrowing(name, halfLife)
+	sampleCQAfter(cache, name, halfLife)
 	removeUsage(cq, cpuFR, cpuCores(10))
 	return cq
 }

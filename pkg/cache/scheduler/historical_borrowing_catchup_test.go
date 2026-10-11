@@ -19,8 +19,7 @@ package scheduler
 import (
 	"math"
 	"testing"
-
-	corev1 "k8s.io/api/core/v1"
+	"time"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/resources"
@@ -67,13 +66,13 @@ func allocateContendedPool(cache *Cache, demanders []kueue.ClusterQueueReference
 func runRound(cache *Cache, demanders ...kueue.ClusterQueueReference) map[kueue.ClusterQueueReference]int64 {
 	alloc := allocateContendedPool(cache, demanders)
 	for _, ref := range bothCQs {
-		cache.SampleCQHistoricalBorrowing(ref, halfLife)
+		sampleCQAfter(cache, ref, halfLife)
 	}
 	return alloc
 }
 
 func emaCores(cache *Cache, ref kueue.ClusterQueueReference) float64 {
-	return float64(amountI64(cache.hm.ClusterQueue(ref).getResourceNode().HistoricalBorrowing[corev1.ResourceCPU])) / 1000.0
+	return cpuHistory(cache.hm.ClusterQueue(ref).getResourceNode()) / 1000.0
 }
 
 func weightProportional(w, wTotal float64) float64 {
@@ -205,7 +204,7 @@ func TestHistoricalBorrowingFreshBorrowerReclaims(t *testing.T) {
 	// cqB is brand new: it is borrowing when first seeded with no status.
 	cqB := cache.hm.ClusterQueue("cqB")
 	addUsage(cqB, cpuFR, cpuCores(catchupPoolCores))
-	cache.EnsureCQHistoricalBorrowingSeeded("cqB", nil)
+	cache.EnsureCQHistoricalBorrowingSeeded("cqB", nil, time.Now())
 	if got := cqB.getResourceNode().HistoricalBorrowing; len(got) != 0 {
 		t.Fatalf("fresh cqB should seed an empty EMA, got %v", got)
 	}

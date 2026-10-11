@@ -17,14 +17,19 @@ limitations under the License.
 package core
 
 import (
+	"context"
+	"errors"
+	"math"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	testingclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
@@ -60,11 +65,22 @@ func hbStatus(cpuCores string, lastUpdate time.Time) *kueue.FairSharingStatus {
 
 // newHBCQFixture wires a cohort plus a CQ object (with its status) into a fake
 // client and an active historical-borrowing cache, returning a reconciler
-// driven by clk.
-func newHBCQFixture(t *testing.T, clk *testingclock.FakeClock, cohort *kueue.Cohort, cq *kueue.ClusterQueue, active bool) (*historicalBorrowingReconciler[*kueue.ClusterQueue], client.Client) {
+// driven by clk. Optional interceptor funcs are installed on the client.
+func newHBCQFixture(
+	t *testing.T,
+	clk *testingclock.FakeClock,
+	cohort *kueue.Cohort,
+	cq *kueue.ClusterQueue,
+	active bool,
+	funcs ...interceptor.Funcs,
+) (*historicalBorrowingReconciler[*kueue.ClusterQueue], client.Client) {
 	t.Helper()
 	ctx, _ := utiltesting.ContextWithLog(t)
-	cl := utiltesting.NewClientBuilder().WithObjects(cq).WithStatusSubresource(cq).Build()
+	builder := utiltesting.NewClientBuilder().WithObjects(cq).WithStatusSubresource(cq)
+	for _, f := range funcs {
+		builder = builder.WithInterceptorFuncs(f)
+	}
+	cl := builder.Build()
 	cfg := hbControllerCfg()
 	opts := []schdcache.Option{schdcache.WithFairSharing(true)}
 	if active {
@@ -155,7 +171,7 @@ func TestHBControllerNotFound(t *testing.T) {
 	r, _ := newHBCQFixture(t, clk, defaultHBCohort(), cq, true)
 
 	ctx, _ := utiltesting.ContextWithLog(t)
-	res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKey{Name: "absent"}})
+	res, err := r.Reconcile(ctx, reconcile.Request{Name: "absent"})
 	if err != nil {
 		t.Fatalf("expected no error for missing object, got %v", err)
 	}
@@ -244,9 +260,9 @@ func TestHBControllerClearsDecayedStatus(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	clk := testingclock.NewFakeClock(now)
 	cq := makeCQWithCohort("cq").Obj()
-	// Seed a sub-epsilon historical value with no current borrowing; a single
-	// sample after one half-life drops it below the epsilon and deletes it.
-	cq.Status.FairSharing = hbStatus("1m", now.Add(-hbHalfLife))
+	// Seed a tiny historical value with no current borrowing; a single sample
+	// after one half-life drops it below the epsilon and deletes it.
+	cq.Status.FairSharing = hbStatus("1u", now.Add(-hbHalfLife))
 	r, cl := newHBCQFixture(t, clk, defaultHBCohort(), cq, true)
 
 	res := reconcileCQ(t, r, cq)
@@ -305,6 +321,78 @@ func TestHBControllerClampsNegativeElapsed(t *testing.T) {
 	hb := getCQHistorical(t, cl, "cq")
 	if hb == nil || !hb.LastUpdate.Equal(&metav1.Time{Time: future}) {
 		t.Fatalf("expected unchanged status with future LastUpdate, got %v", hb)
+	}
+}
+
+// TestHBControllerConflictDoesNotRepeatDecay verifies that a conflicted status
+// write does not make the next tick re-apply the elapsed time the in-memory EMA
+// already absorbed: the next tick decays only for the time since that sample,
+// not again from the stale persisted LastUpdate.
+func TestHBControllerConflictDoesNotRepeatDecay(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	clk := testingclock.NewFakeClock(now)
+	cq := makeCQWithCohort("cq").Obj()
+	cq.Status.FairSharing = hbStatus("5", now.Add(-hbHalfLife))
+	conflicts := 1
+	r, cl := newHBCQFixture(t, clk, defaultHBCohort(), cq, true, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if conflicts > 0 {
+				conflicts--
+				return apierrors.NewConflict(kueue.Resource("clusterqueues"), obj.GetName(), errors.New("conflict"))
+			}
+			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+		},
+	})
+
+	reconcileCQ(t, r, cq) // 5000m decays to 2500m in memory; the write conflicts.
+	clk.Step(hbInterval)
+	reconcileCQ(t, r, cq)
+
+	want := 2500 * math.Pow(0.5, hbInterval.Seconds()/hbHalfLife.Seconds())
+	hb := getCQHistorical(t, cl, "cq")
+	if hb == nil || math.Abs(float64(hb.BorrowedResources.Cpu().MilliValue())-want) > 1 {
+		t.Fatalf("persisted cpu after a conflicted tick = %v, want ~%.0fm", hb, want)
+	}
+}
+
+// TestHBControllerEventBurstSamplesOnce verifies a borrowing CQ without a
+// persisted status samples once per interval, however many events trigger a
+// reconcile in between.
+func TestHBControllerEventBurstSamplesOnce(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	clk := testingclock.NewFakeClock(now)
+	cq := cqWithCPU("cq", "0", "default").Obj()
+	r, cl := newHBCQFixture(t, clk, defaultHBCohort(), cq, true)
+	ctx, log := utiltesting.ContextWithLog(t)
+	r.cache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("default").Obj())
+	wl := utiltestingapi.MakeWorkload("wl", "ns").
+		Request(corev1.ResourceCPU, "2").
+		ReserveQuotaAt(utiltestingapi.MakeAdmission("cq").
+			PodSets(utiltestingapi.MakePodSetAssignment(kueue.DefaultPodSetName).
+				Assignment(corev1.ResourceCPU, "default", "2").
+				Obj()).
+			Obj(), now).
+		AdmittedAt(true, now).
+		Obj()
+	if !r.cache.AddOrUpdateWorkload(ctx, log, wl) {
+		t.Fatal("Failed adding workload to cache")
+	}
+
+	for range 5 {
+		reconcileCQ(t, r, cq)
+	}
+	if hb := getCQHistorical(t, cl, "cq"); hb != nil {
+		t.Fatalf("expected no sample before the first interval, got %v", hb)
+	}
+	clk.Step(hbInterval)
+	for range 5 {
+		reconcileCQ(t, r, cq)
+	}
+
+	want := 2000 * (1 - math.Pow(0.5, hbInterval.Seconds()/hbHalfLife.Seconds()))
+	hb := getCQHistorical(t, cl, "cq")
+	if hb == nil || math.Abs(float64(hb.BorrowedResources.Cpu().MilliValue())-want) > 1 {
+		t.Fatalf("persisted cpu after a burst of reconciles = %v, want ~%.0fm (one sample)", hb, want)
 	}
 }
 

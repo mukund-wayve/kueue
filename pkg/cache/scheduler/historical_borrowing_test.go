@@ -17,7 +17,6 @@ limitations under the License.
 package scheduler
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -44,7 +43,7 @@ func TestHistoricalBorrowingFlagsBorrowingFromHistory(t *testing.T) {
 			cache := newHistoricalBorrowingCache(t)
 			cqImpl := cache.hm.ClusterQueue("cq")
 			addUsage(cqImpl, cpuFR, cpuCores(15))
-			cache.SampleCQHistoricalBorrowing("cq", time.Minute)
+			sampleCQAfter(cache, "cq", time.Minute)
 			// Drop usage below quota so there is no instantaneous borrowing.
 			removeUsage(cqImpl, cpuFR, cpuCores(6))
 			if instant := currentBorrowingByResource(cqImpl.getResourceNode(), nil); len(instant) != 0 {
@@ -88,7 +87,7 @@ func TestHistoricalBorrowingMarksAllFlavorsWhenHistoryDominates(t *testing.T) {
 	// Currently borrowing only 2 cores on f1 (usage 12, nominal 10).
 	addUsage(cqImpl, f1FR, cpuCores(12))
 	// Remembered borrowing of 8 cores on cpu dominates the 2-core instant.
-	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(8000))
+	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(8000), time.Now())
 
 	drs := dominantResourceShare(cqImpl, nil)
 	if !drs.IsBorrowingOn(resources.FlavorResourceQuantities{f1FR: cpuCores(1)}) {
@@ -129,17 +128,17 @@ func TestHistoricalBorrowingDecaysToZero(t *testing.T) {
 	cache := newHistoricalBorrowingCache(t)
 	cqImpl := cache.hm.ClusterQueue("cq")
 	addUsage(cqImpl, cpuFR, cpuCores(15))
-	cache.SampleCQHistoricalBorrowing("cq", time.Minute)
+	sampleCQAfter(cache, "cq", time.Minute)
 
 	// Stop borrowing, then sample for much longer than the half-life: the EMA
 	// must decay all the way to zero and the entry must be dropped.
 	removeUsage(cqImpl, cpuFR, cpuCores(15))
-	cache.SampleCQHistoricalBorrowing("cq", 10*halfLife)
+	sampleCQAfter(cache, "cq", 30*halfLife)
 
 	if len(cqImpl.getResourceNode().HistoricalBorrowing) != 0 {
 		t.Fatalf("expected historical borrowing to be cleared, got %v", cqImpl.getResourceNode().HistoricalBorrowing)
 	}
-	if status := cache.historicalBorrowingStatusFromNode(cqImpl); status != nil {
+	if status := historicalBorrowingStatus(cqImpl, time.Now()); status != nil {
 		t.Fatalf("expected nil status after decay, got %v", status)
 	}
 	if drs := dominantResourceShare(cqImpl, nil); !drs.IsZero() {
@@ -157,14 +156,14 @@ func TestHistoricalBorrowingSeeding(t *testing.T) {
 	}{
 		"clusterqueue": {
 			seed: func(c *Cache, status *kueue.HistoricalBorrowingStatus) {
-				c.EnsureCQHistoricalBorrowingSeeded("cq", status)
+				c.EnsureCQHistoricalBorrowingSeeded("cq", status, time.Now())
 			},
 			node: func(c *Cache) resourceNode { return c.hm.ClusterQueue("cq").getResourceNode() },
 			key:  historicalSeededKey("cq", "cq"),
 		},
 		"cohort": {
 			seed: func(c *Cache, status *kueue.HistoricalBorrowingStatus) {
-				c.EnsureCohortHistoricalBorrowingSeeded("cohort", status)
+				c.EnsureCohortHistoricalBorrowingSeeded("cohort", status, time.Now())
 			},
 			node: func(c *Cache) resourceNode { return c.hm.Cohort("cohort").getResourceNode() },
 			key:  historicalSeededKey("cohort", "cohort"),
@@ -176,10 +175,10 @@ func TestHistoricalBorrowingSeeding(t *testing.T) {
 			cache := newHistoricalBorrowingCache(t)
 			tc.seed(cache, cpuHistoryStatus(5000))
 
-			if got := tc.node(cache).HistoricalBorrowing[corev1.ResourceCPU]; amountI64(got) != 5000 {
-				t.Fatalf("seeded historical borrowing = %d, want 5000", amountI64(got))
+			if got := cpuHistory(tc.node(cache)); got != 5000 {
+				t.Fatalf("seeded historical borrowing = %v, want 5000", got)
 			}
-			if !cache.hb.seeded.Has(tc.key) {
+			if _, seeded := cache.hb.lastSample[tc.key]; !seeded {
 				t.Fatal("expected node to be marked seeded")
 			}
 		})
@@ -191,16 +190,16 @@ func TestHistoricalBorrowingSeeding(t *testing.T) {
 // name is re-seeded from persisted status instead of starting empty.
 func TestHistoricalBorrowingReseedsAfterRecreate(t *testing.T) {
 	cache := newHistoricalBorrowingCache(t)
-	ctx := context.Background()
+	ctx := t.Context()
 	status := cpuHistoryStatus(5000)
 
-	cache.EnsureCQHistoricalBorrowingSeeded("cq", status)
-	if !cache.hb.seeded.Has(historicalSeededKey("cq", "cq")) {
+	cache.EnsureCQHistoricalBorrowingSeeded("cq", status, time.Now())
+	if _, seeded := cache.hb.lastSample[historicalSeededKey("cq", "cq")]; !seeded {
 		t.Fatal("expected CQ to be marked seeded")
 	}
 
 	cache.DeleteClusterQueue(singleFlavorCQ())
-	if cache.hb.seeded.Has(historicalSeededKey("cq", "cq")) {
+	if _, seeded := cache.hb.lastSample[historicalSeededKey("cq", "cq")]; seeded {
 		t.Fatal("expected seeded marker to be cleared on delete")
 	}
 
@@ -208,10 +207,9 @@ func TestHistoricalBorrowingReseedsAfterRecreate(t *testing.T) {
 	if err := cache.AddClusterQueue(ctx, singleFlavorCQ()); err != nil {
 		t.Fatalf("re-AddClusterQueue: %v", err)
 	}
-	cache.EnsureCQHistoricalBorrowingSeeded("cq", status)
-	got := cache.hm.ClusterQueue("cq").getResourceNode().HistoricalBorrowing[corev1.ResourceCPU]
-	if amountI64(got) != 5000 {
-		t.Fatalf("re-seeded historical borrowing = %d, want 5000", amountI64(got))
+	cache.EnsureCQHistoricalBorrowingSeeded("cq", status, time.Now())
+	if got := cpuHistory(cache.hm.ClusterQueue("cq").getResourceNode()); got != 5000 {
+		t.Fatalf("re-seeded historical borrowing = %v, want 5000", got)
 	}
 }
 
@@ -221,9 +219,9 @@ func TestHistoricalBorrowingReseedsAfterRecreate(t *testing.T) {
 // flavors. Storing the EMA per resource name (not per flavor) guarantees this.
 func TestHistoricalBorrowingRestoreRoundTrip(t *testing.T) {
 	cache := newTwoFlavorCache(t)
-	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(5000))
+	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(5000), time.Now())
 
-	persisted := cache.historicalBorrowingStatusFromNode(cache.hm.ClusterQueue("cq"))
+	persisted := historicalBorrowingStatus(cache.hm.ClusterQueue("cq"), time.Now())
 	if persisted == nil {
 		t.Fatal("expected persisted status, got nil")
 	}
@@ -285,7 +283,7 @@ func TestHistoricalBorrowingInactiveNoop(t *testing.T) {
 	if err := cache.AddOrUpdateCohort(singleFlavorCohort()); err != nil {
 		t.Fatalf("AddOrUpdateCohort: %v", err)
 	}
-	if err := cache.AddClusterQueue(context.Background(), singleFlavorCQ()); err != nil {
+	if err := cache.AddClusterQueue(t.Context(), singleFlavorCQ()); err != nil {
 		t.Fatalf("AddClusterQueue: %v", err)
 	}
 
@@ -293,16 +291,17 @@ func TestHistoricalBorrowingInactiveNoop(t *testing.T) {
 		t.Fatal("expected strategy inactive with feature gate disabled")
 	}
 
-	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(5000))
-	cache.EnsureCohortHistoricalBorrowingSeeded("cohort", cpuHistoryStatus(5000))
-	if status, found := cache.SampleCQHistoricalBorrowing("cq", time.Minute); status != nil || found {
+	now := time.Now()
+	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(5000), now)
+	cache.EnsureCohortHistoricalBorrowingSeeded("cohort", cpuHistoryStatus(5000), now)
+	if status, _, found := cache.SampleCQHistoricalBorrowing("cq", now); status != nil || found {
 		t.Fatalf("SampleCQHistoricalBorrowing on inactive cache = (%v, %v), want (nil, false)", status, found)
 	}
-	if status, found := cache.SampleCohortHistoricalBorrowing("cohort", time.Minute); status != nil || found {
+	if status, _, found := cache.SampleCohortHistoricalBorrowing("cohort", now); status != nil || found {
 		t.Fatalf("SampleCohortHistoricalBorrowing on inactive cache = (%v, %v), want (nil, false)", status, found)
 	}
-	if cache.hb.seeded.Len() != 0 {
-		t.Fatalf("expected no nodes seeded while inactive, got %d", cache.hb.seeded.Len())
+	if len(cache.hb.lastSample) != 0 {
+		t.Fatalf("expected no nodes seeded while inactive, got %d", len(cache.hb.lastSample))
 	}
 	if got := cache.hm.ClusterQueue("cq").getResourceNode().HistoricalBorrowing; got != nil {
 		t.Fatalf("expected nil historical borrowing map while inactive, got %v", got)
@@ -314,12 +313,13 @@ func TestHistoricalBorrowingInactiveNoop(t *testing.T) {
 func TestHistoricalBorrowingMissingObjectNoop(t *testing.T) {
 	cache := newHistoricalBorrowingCache(t)
 
-	cache.EnsureCQHistoricalBorrowingSeeded("missing", cpuHistoryStatus(5000))
-	cache.EnsureCohortHistoricalBorrowingSeeded("missing", cpuHistoryStatus(5000))
-	if status, found := cache.SampleCQHistoricalBorrowing("missing", time.Minute); status != nil || found {
+	now := time.Now()
+	cache.EnsureCQHistoricalBorrowingSeeded("missing", cpuHistoryStatus(5000), now)
+	cache.EnsureCohortHistoricalBorrowingSeeded("missing", cpuHistoryStatus(5000), now)
+	if status, _, found := cache.SampleCQHistoricalBorrowing("missing", now); status != nil || found {
 		t.Fatalf("SampleCQHistoricalBorrowing on missing CQ = (%v, %v), want (nil, false)", status, found)
 	}
-	if status, found := cache.SampleCohortHistoricalBorrowing("missing", time.Minute); status != nil || found {
+	if status, _, found := cache.SampleCohortHistoricalBorrowing("missing", now); status != nil || found {
 		t.Fatalf("SampleCohortHistoricalBorrowing on missing cohort = (%v, %v), want (nil, false)", status, found)
 	}
 }
@@ -330,12 +330,11 @@ func TestHistoricalBorrowingMissingObjectNoop(t *testing.T) {
 func TestHistoricalBorrowingSeedOnceIdempotent(t *testing.T) {
 	cache := newHistoricalBorrowingCache(t)
 
-	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(5000))
+	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(5000), time.Now())
 	// Second call with a different status must leave the already-seeded EMA intact.
-	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(9000))
+	cache.EnsureCQHistoricalBorrowingSeeded("cq", cpuHistoryStatus(9000), time.Now())
 
-	got := cache.hm.ClusterQueue("cq").getResourceNode().HistoricalBorrowing[corev1.ResourceCPU]
-	if amountI64(got) != 5000 {
-		t.Fatalf("second seed overwrote EMA: got %d, want 5000 (seed once)", amountI64(got))
+	if got := cpuHistory(cache.hm.ClusterQueue("cq").getResourceNode()); got != 5000 {
+		t.Fatalf("second seed overwrote EMA: got %v, want 5000 (seed once)", got)
 	}
 }

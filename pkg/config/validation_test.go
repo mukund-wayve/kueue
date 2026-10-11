@@ -18,6 +18,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -34,7 +35,6 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/component-base/featuregate"
-	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
 	"sigs.k8s.io/kueue/pkg/controller/jobs"
@@ -1150,7 +1150,7 @@ func TestValidate(t *testing.T) {
 					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
 						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
 						BorrowingSamplingInterval: metav1.Duration{Duration: time.Minute},
-						BorrowingHistoryWeight:    ptr.To(0.0),
+						BorrowingHistoryWeight:    new(0.0),
 					},
 				},
 			},
@@ -1165,7 +1165,49 @@ func TestValidate(t *testing.T) {
 					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
 						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
 						BorrowingSamplingInterval: metav1.Duration{Duration: time.Minute},
-						BorrowingHistoryWeight:    ptr.To(-1.0),
+						BorrowingHistoryWeight:    new(-1.0),
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "fairSharing.historicalBorrowing.borrowingHistoryWeight",
+				},
+			},
+		},
+		"historical borrowing rejects NaN borrowingHistoryWeight": {
+			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
+						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
+						BorrowingSamplingInterval: metav1.Duration{Duration: time.Minute},
+						BorrowingHistoryWeight:    new(math.NaN()),
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "fairSharing.historicalBorrowing.borrowingHistoryWeight",
+				},
+			},
+		},
+		"historical borrowing rejects infinite borrowingHistoryWeight": {
+			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
+						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
+						BorrowingSamplingInterval: metav1.Duration{Duration: time.Minute},
+						BorrowingHistoryWeight:    new(math.Inf(1)),
 					},
 				},
 			},

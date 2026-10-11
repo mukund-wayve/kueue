@@ -18,19 +18,28 @@ package scheduler
 
 import (
 	"math"
+	"strconv"
 	"time"
 
+	"gopkg.in/inf.v0"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/resources"
 )
 
-// historicalBorrowingEpsilon is the per-resource amount below which a decayed
-// EMA entry is dropped. Without it a truncated EMA can stick at a small residual
-// forever, keeping a node flagged as borrowing long after it stopped.
-const historicalBorrowingEpsilon = 1
+// historicalBorrowingEpsilon is the per-resource amount, in accounting units,
+// below which an EMA entry no longer fed by current borrowing is dropped. The
+// EMA is kept in float64 so that small per-tick contributions (alpha*borrowing
+// is often far below one unit for whole-unit resources such as GPUs) are not
+// truncated away; the geometric decay then needs a floor to ever end.
+const historicalBorrowingEpsilon = 1e-3
+
+// historicalBorrowingScale is the number of decimal places, in the resource's
+// API unit, kept when the EMA is persisted.
+const historicalBorrowingScale = 9
 
 func borrowingAlphaRate(elapsedSeconds, halfLifeSeconds float64) float64 {
 	if halfLifeSeconds == 0 {
@@ -65,34 +74,46 @@ func currentBorrowingByResource(rn resourceNode, wlReq resources.FlavorResourceQ
 	return byResource
 }
 
-// applyHistoricalBorrowing augments the instantaneous borrowing already computed
-// by dominantResourceShare with remembered borrowing. It is a no-op unless the
-// node carries historical data (only populated while the HistoricalBorrowing
-// strategy is active) and k > 0, so the default DRS path is unchanged.
+// historicalBorrowingTerms returns the remembered borrowing that
+// dominantResourceShare adds on top of instantaneous borrowing, as k*EMA per
+// resource in accounting units. It returns nil unless the node carries
+// historical data (only populated while the HistoricalBorrowing strategy is
+// active) and k > 0, so the default DRS path is unchanged.
 //
-// For each resource it adds k*decayedBorrowing on top of the current borrowing,
-// i.e. effectiveBorrowing[r] = current[r] + k*EMA[r], where k is the node's
+// The effective borrowing is current[r] + k*EMA[r], where k is the node's
 // BorrowingHistoryWeight. Unlike a max() fold (which can only raise a node to
 // its own instantaneous borrowing), the additive term keeps inflating a heavy
 // past borrower's share even when its current borrowing already matches its
 // history, so a light or new borrower (EMA=0) is preferred by CompareDRS at
 // equal current borrowing and can catch up. k=0 reproduces the plain Borrowing
-// score. Every flavor of an affected resource that is not already counted as
-// currently borrowing is reported as borrowed (the per-resource EMA does not
-// record which flavor the borrowing came from). borrowing is mutated in place;
-// the extended borrowedFRs is returned.
-func applyHistoricalBorrowing(node dominantResourceShareNode, wlReq resources.FlavorResourceQuantities, borrowing map[corev1.ResourceName]resources.Amount, borrowedFRs []resources.FlavorResource) []resources.FlavorResource {
+// score. The terms stay in float64 so sub-unit history still moves the ratio.
+//
+// Each resource with history is added to borrowing (as zero when not currently
+// borrowed) so the caller's ratio loop visits it, and every flavor of it that is
+// not already counted as currently borrowing is reported as borrowed (the
+// per-resource EMA does not record which flavor the borrowing came from). The
+// extended borrowedFRs is returned.
+func historicalBorrowingTerms(
+	node dominantResourceShareNode,
+	wlReq resources.FlavorResourceQuantities,
+	borrowing map[corev1.ResourceName]resources.Amount,
+	borrowedFRs []resources.FlavorResource,
+) (map[corev1.ResourceName]float64, []resources.FlavorResource) {
 	rn := node.getResourceNode()
 	if len(rn.HistoricalBorrowing) == 0 || rn.BorrowingHistoryWeight == 0 {
-		return borrowedFRs
+		return nil, borrowedFRs
 	}
 	currentFR := currentBorrowingFR(rn, wlReq)
+	terms := make(map[corev1.ResourceName]float64, len(rn.HistoricalBorrowing))
 	for r, hist := range rn.HistoricalBorrowing {
-		weighted := int64(rn.BorrowingHistoryWeight * amountFloat64(hist))
-		if weighted <= 0 {
+		weighted := rn.BorrowingHistoryWeight * hist
+		if !(weighted > 0) {
 			continue
 		}
-		borrowing[r] = borrowing[r].Add(resources.NewAmount(weighted))
+		terms[r] = weighted
+		if _, ok := borrowing[r]; !ok {
+			borrowing[r] = resources.Amount{}
+		}
 		for fr := range rn.SubtreeQuota {
 			if fr.Resource != r {
 				continue
@@ -103,7 +124,18 @@ func applyHistoricalBorrowing(node dominantResourceShareNode, wlReq resources.Fl
 			borrowedFRs = append(borrowedFRs, fr)
 		}
 	}
-	return borrowedFRs
+	return terms, borrowedFRs
+}
+
+// historicalPerThousand returns the history term h over lendable in thousandths,
+// on the same scale as Amount.PerThousandOf. lendable must be positive. A
+// lendable past int64 makes any realistic history negligible.
+func historicalPerThousand(h float64, lendable resources.Amount) float64 {
+	l, ok := lendable.Int64()
+	if h == 0 || !ok {
+		return 0
+	}
+	return h * 1000 / float64(l)
 }
 
 // sampleHistoricalBorrowing folds the node's current borrowing into its
@@ -129,20 +161,13 @@ func sampleHistoricalBorrowing(node hierarchicalResourceNode, elapsed, halfLife 
 		resourceNames.Insert(r)
 	}
 	for r := range resourceNames {
-		// old/cur are resource Amounts converted to float64 for the blend. The
-		// 53-bit mantissa represents these exactly up to ~9e15 (e.g. ~9 PB of
-		// memory in bytes, ~9e12 cpu millicores), which is far above any
-		// realistic quota, so the conversion is lossless in practice.
-		old := amountFloat64(rn.HistoricalBorrowing[r])
 		cur := amountFloat64(current[r])
-		// Truncate toward zero so a resource with no current borrowing strictly
-		// decays each tick and eventually reaches zero (rounding could stall).
-		blended := int64((1-alpha)*old + alpha*cur)
-		if blended < historicalBorrowingEpsilon {
+		blended := (1-alpha)*rn.HistoricalBorrowing[r] + alpha*cur
+		if cur == 0 && blended < historicalBorrowingEpsilon {
 			delete(rn.HistoricalBorrowing, r)
 			continue
 		}
-		rn.HistoricalBorrowing[r] = resources.NewAmount(blended)
+		rn.HistoricalBorrowing[r] = blended
 	}
 }
 
@@ -161,25 +186,47 @@ func sampleHistoricalBorrowing(node hierarchicalResourceNode, elapsed, halfLife 
 //     scored as a heavy past borrower from the first tick.
 func seedHistoricalBorrowingNode(node hierarchicalResourceNode, status *kueue.HistoricalBorrowingStatus) {
 	rn := node.getResourceNode()
-	if status != nil && len(status.BorrowedResources) > 0 {
-		for r, q := range status.BorrowedResources {
-			rn.HistoricalBorrowing[r] = resources.AmountFromQuantity(r, q)
+	if status == nil {
+		return
+	}
+	for r, q := range status.BorrowedResources {
+		if v := quantityToHistoricalBorrowing(r, q); v > 0 {
+			rn.HistoricalBorrowing[r] = v
 		}
 	}
 }
 
 // historicalBorrowingToResourceList converts the per-resource historical
-// borrowing EMA into a ResourceList for persistence. It is a direct copy, so
-// persist/restore round-trips without amplification.
-func historicalBorrowingToResourceList(hb map[corev1.ResourceName]resources.Amount, formatter *resources.ResourceFormatter) corev1.ResourceList {
+// borrowing EMA into a ResourceList for persistence. Values keep
+// historicalBorrowingScale decimal places, rounded down, so persist/restore
+// round-trips sub-unit history without amplification.
+func historicalBorrowingToResourceList(hb map[corev1.ResourceName]float64) corev1.ResourceList {
 	if len(hb) == 0 {
 		return nil
 	}
 	result := make(corev1.ResourceList, len(hb))
-	for r, amount := range hb {
-		result[r] = formatter.AmountQuantity(r, amount)
+	for r, v := range hb {
+		if r == corev1.ResourceCPU {
+			v /= 1000
+		}
+		d, ok := new(inf.Dec).SetString(strconv.FormatFloat(v, 'f', -1, 64))
+		if !ok {
+			continue
+		}
+		d.Round(d, historicalBorrowingScale, inf.RoundDown)
+		result[r] = *resource.NewDecimalQuantity(*d, resource.DecimalSI)
 	}
 	return result
+}
+
+// quantityToHistoricalBorrowing converts a persisted quantity back to the EMA's
+// accounting units (milliCPU for cpu, whole units otherwise).
+func quantityToHistoricalBorrowing(r corev1.ResourceName, q resource.Quantity) float64 {
+	v := q.AsApproximateFloat64()
+	if r == corev1.ResourceCPU {
+		v *= 1000
+	}
+	return v
 }
 
 // amountFloat64 returns a as a float64 in its internal accounting units, for the

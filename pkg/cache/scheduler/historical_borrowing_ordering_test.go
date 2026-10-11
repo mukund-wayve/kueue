@@ -17,7 +17,6 @@ limitations under the License.
 package scheduler
 
 import (
-	"context"
 	"testing"
 
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -132,8 +131,8 @@ func TestHistoricalBorrowingDecayFlipsOrdering(t *testing.T) {
 
 	addUsage(cqA, cpuFR, cpuCores(10)) // borrow 5
 	addUsage(cqB, cpuFR, cpuCores(6))  // borrow 1
-	cache.SampleCQHistoricalBorrowing("cqA", halfLife)
-	cache.SampleCQHistoricalBorrowing("cqB", halfLife)
+	sampleCQAfter(cache, "cqA", halfLife)
+	sampleCQAfter(cache, "cqB", halfLife)
 
 	if CompareDRS(dominantResourceShare(cqA, nil), dominantResourceShare(cqB, nil)) <= 0 {
 		t.Fatal("expected heavy borrower cqA to initially rank higher than cqB")
@@ -142,8 +141,8 @@ func TestHistoricalBorrowingDecayFlipsOrdering(t *testing.T) {
 	// cqA goes idle, cqB keeps borrowing; A's history decays below B.
 	removeUsage(cqA, cpuFR, cpuCores(10))
 	for range 3 {
-		cache.SampleCQHistoricalBorrowing("cqA", halfLife)
-		cache.SampleCQHistoricalBorrowing("cqB", halfLife)
+		sampleCQAfter(cache, "cqA", halfLife)
+		sampleCQAfter(cache, "cqB", halfLife)
 	}
 
 	if CompareDRS(dominantResourceShare(cqA, nil), dominantResourceShare(cqB, nil)) >= 0 {
@@ -157,7 +156,7 @@ func TestHistoricalBorrowingSurvivesSnapshot(t *testing.T) {
 	cache := newTwoCQCohortCache(t)
 	rememberCPUBorrowing(cache, "cqA")
 
-	ctx := context.Background()
+	ctx := t.Context()
 	snapshot, err := cache.Snapshot(ctx)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)

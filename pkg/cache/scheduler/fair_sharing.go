@@ -183,7 +183,7 @@ func dominantResourceShare(node dominantResourceShareNode, wlReq resources.Flavo
 	// Under the HistoricalBorrowing strategy, fold remembered borrowing into the
 	// instantaneous result before the no-borrowing short-circuit, so a node that
 	// borrowed recently still scores as borrowing. No-op otherwise.
-	borrowedFRs = applyHistoricalBorrowing(node, wlReq, borrowing, borrowedFRs)
+	history, borrowedFRs := historicalBorrowingTerms(node, wlReq, borrowing, borrowedFRs)
 	if len(borrowing) == 0 {
 		return drs
 	}
@@ -195,7 +195,7 @@ func dominantResourceShare(node dominantResourceShareNode, wlReq resources.Flavo
 	lendable := node.parentHRN().getResourceNode().Lendable
 	for rName, b := range borrowing {
 		if lr := lendable[rName]; lr.CmpInt64(0) > 0 {
-			ratio := b.PerThousandOf(lr)
+			ratio := b.PerThousandOf(lr) + historicalPerThousand(history[rName], lr)
 			// Use alphabetical order to get a deterministic resource name.
 			if ratio > drs.unweightedRatio || (ratio == drs.unweightedRatio && rName < drs.dominantResource) {
 				drs.unweightedRatio = ratio
