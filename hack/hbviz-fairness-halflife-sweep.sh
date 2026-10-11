@@ -3,6 +3,13 @@
 # running (colima/docker) kind cluster. k is held at 4. For each half-life it
 # patches the deployed Kueue config, restarts the manager, runs only the
 # fairness spec, and saves a half-life-labelled HTML.
+#
+# Needs the cluster from `make test-e2e-hb-viz E2E_MODE=dev` (see the comment on
+# that target in hack/make/test.mk for macOS/Colima setup and known issues) and
+# uses the current kubectl context, e.g. `kubectl config use-context kind-hb-e2e`.
+# After `colima restart` the inotify limit is back to its default, so kind nodes
+# may exit with "Too many open files": raise it again as described there, then
+# `docker start` the stopped node containers.
 set -o errexit
 set -o pipefail
 set -o nounset

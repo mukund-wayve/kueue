@@ -2,14 +2,20 @@
 # Sweep borrowingHistoryWeight (k) over the recency e2e spec against an already
 # running kind cluster. For each k it patches the deployed Kueue config,
 # restarts the manager, runs only the recency spec, and saves a k-labelled HTML.
+#
+# Needs the cluster from `make test-e2e-hb-viz E2E_MODE=dev` (see the comment on
+# that target in hack/make/test.mk for macOS/Colima setup and known issues) and
+# uses the current kubectl context, e.g. `kubectl config use-context kind-hb-e2e`.
+# After `colima restart` the inotify limit is back to its default, so kind nodes
+# may exit with "Too many open files": raise it again as described there, then
+# `docker start` the stopped node containers.
 set -o errexit
 set -o pipefail
 set -o nounset
 
 cd "$(git rev-parse --show-toplevel)"
 
-export PATH="/tmp/hbviz-bin:/opt/homebrew/bin:$PATH"
-export KIND_EXPERIMENTAL_PROVIDER=podman
+export PATH="$PWD/bin:/usr/local/go/bin:/opt/homebrew/bin:/usr/bin:/bin"
 
 SWEEP_DIR="artifacts/hbviz-k-sweep"
 mkdir -p "$SWEEP_DIR"

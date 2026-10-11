@@ -309,6 +309,29 @@ test-e2e-baseline: setup-e2e-env kueuectl run-test-e2e-baseline-$(E2E_KIND_VERSI
 # Kueue image (kind-image-build), brings up a kind cluster configured for the
 # HistoricalBorrowing fair sharing strategy, drives two ClusterQueues with real
 # sleep(2-5s) Jobs, and writes historical-borrowing-viz.html under ARTIFACTS.
+#
+# Running locally on macOS with Colima (the e2e scripts assume a Linux CI host;
+# a TLS-intercepting corporate proxy makes some of these worse):
+#   - "timeout: command not found": the scripts need GNU timeout. Run
+#     `brew install coreutils` and prepend $(brew --prefix coreutils)/libexec/gnubin
+#     to PATH.
+#   - x509 "certificate signed by unknown authority" pulling the golang builder
+#     image: the docker-container buildx builder does not trust the corporate CA.
+#     Build through the Colima daemon, which does: BUILDX_BUILDER=colima.
+#   - Kind fails with 'could not find a log line that matches "Reached target
+#     .*Multi-User System.*"' (the node logs "Too many open files"): the VM ran
+#     out of inotify instances, usually because other kind clusters are running.
+#     The setting resets on `colima restart`:
+#       colima ssh -- sudo sysctl -w fs.inotify.max_user_instances=8192
+#   - x509 errors from `kind build node-image`: pre-pull the official node image
+#     and tag it so E2E_MODE=dev reuses it instead of building one:
+#       docker pull kindest/node:v1.36.4
+#       docker tag kindest/node:v1.36.4 kueue/kind-node:v1.36.4
+#   - "i/o timeout" pulling from a registry right after `colima start`: the VM
+#     network is still settling; retry.
+# Then run (E2E_MODE=dev keeps the cluster for the hack/hbviz-*-sweep.sh scripts):
+#   BUILDX_BUILDER=colima make test-e2e-hb-viz E2E_MODE=dev \
+#     KIND_CLUSTER_NAME=hb-e2e E2E_KIND_VERSION=kindest/node:v1.36.4
 .PHONY: test-e2e-hb-viz
 test-e2e-hb-viz: GINKGO_ARGS = --timeout=2h
 test-e2e-hb-viz: kind-image-build setup-e2e-env run-test-e2e-hb-viz-$(E2E_KIND_VERSION:kindest/node:v%=%) ## Run the historical borrowing visualization demo (writes an HTML chart to ARTIFACTS).
