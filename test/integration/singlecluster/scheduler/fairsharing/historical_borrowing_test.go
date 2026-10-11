@@ -127,6 +127,29 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 	}
 
+	expectPending := func(cqName string, n int32) {
+		ginkgo.GinkgoHelper()
+		gomega.Eventually(func(g gomega.Gomega) {
+			cq := &kueue.ClusterQueue{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: cqName}, cq)).To(gomega.Succeed())
+			g.Expect(cq.Status.PendingWorkloads).To(gomega.Equal(n))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+	}
+
+	// queueBehindLender lets lender borrow all 6 cpu of cohort capacity, then
+	// queues 3 one-cpu workloads on each contender. Freeing lender capacity one
+	// cpu at a time afterwards makes the contenders compete for each slot, so
+	// the scheduler orders them by fair share rather than by arrival.
+	queueBehindLender := func(lender *kueue.ClusterQueue, contenders ...string) {
+		ginkgo.GinkgoHelper()
+		createWorkloads(lender.Name, 6, "1")
+		expectReserving(lender.Name, 6)
+		for _, cq := range contenders {
+			createWorkloads(cq, 3, "1")
+			expectPending(cq, 3)
+		}
+	}
+
 	// borrowedCPU returns the persisted cpu historical borrowing from a
 	// FairSharingStatus, or the zero Quantity when no history is recorded.
 	borrowedCPU := func(fs *kueue.FairSharingStatus) resource.Quantity {
@@ -307,22 +330,20 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 
 		createQueue(cpuQueue("a", "all", "1").Obj())
 		createQueue(cpuQueue("b", "all", "1").Obj())
-		createQueue(cpuQueue("lender", "all", "4").Obj())
+		lender := createQueue(cpuQueue("lender", "all", "4").Obj())
 
 		// The long half-life keeps a's seeded memory effectively constant for
 		// the spec.
 		ginkgo.By("Seeding a with remembered borrowing and restarting the manager")
 		seedAndRestart("a", "5", hbFairSharing(time.Second, time.Hour))
 
-		// lender fills its own 4 cpu nominal quota (no borrowing), leaving only
-		// 2 cpu of cohort capacity for a and b to contend over.
-		ginkgo.By("Filling lender to leave 2 cpu of contended capacity")
-		createWorkloads("lender", 4, "1")
-		expectReserving("lender", 4)
+		ginkgo.By("Queueing equal demand on a and b while lender holds all capacity")
+		queueBehindLender(lender, "b", "a")
 
-		ginkgo.By("Submitting equal demand to a and b; the idle b wins the free capacity")
-		createWorkloads("b", 3, "1")
-		createWorkloads("a", 3, "1")
+		ginkgo.By("Freeing 2 cpu one at a time; the idle b wins both")
+		integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 1)
+		expectReserving("b", 1)
+		integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 1)
 		gomega.Eventually(func(g gomega.Gomega) {
 			cqAStatus := &kueue.ClusterQueue{}
 			cqBStatus := &kueue.ClusterQueue{}
@@ -340,42 +361,42 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 
 	ginkgo.It("penalizes a remembered borrowing cohort in admission order", func() {
 		// Cohort analogue of the ClusterQueue ordering spec: the seeded history
-		// lives on a child cohort (chA), so its inflated dominant resource share
-		// must shut out chA's member CQ in favor of the idle sibling cohort's CQ.
+		// lives on a child cohort (ch-a), so its inflated dominant resource share
+		// must shut out ch-a's member CQ in favor of the idle sibling cohort's CQ.
 		startHB(hbFairSharing(time.Second, time.Hour))
 		createFlavor()
 
 		// root's lendable pool is the sum of member nominal quotas (lender 4 +
-		// cqA 1 + cqB 1 = 6). chA and chB own no quota, so any over-nominal usage
-		// by their member CQ makes the cohort borrow.
+		// cq-a 1 + cq-b 1 = 6). ch-a and ch-b own no quota, so any over-nominal
+		// usage by their member CQ makes the cohort borrow.
 		createCohort(utiltestingapi.MakeCohort("root").Obj())
-		createCohort(utiltestingapi.MakeCohort("chA").Parent("root").Obj())
-		createCohort(utiltestingapi.MakeCohort("chB").Parent("root").Obj())
-		createQueue(cpuQueue("cqA", "chA", "1").Obj())
-		createQueue(cpuQueue("cqB", "chB", "1").Obj())
-		createQueue(cpuQueue("lender", "root", "4").Obj())
+		createCohort(utiltestingapi.MakeCohort("ch-a").Parent("root").Obj())
+		createCohort(utiltestingapi.MakeCohort("ch-b").Parent("root").Obj())
+		createQueue(cpuQueue("cq-a", "ch-a", "1").Obj())
+		createQueue(cpuQueue("cq-b", "ch-b", "1").Obj())
+		lender := createQueue(cpuQueue("lender", "root", "4").Obj())
 
-		ginkgo.By("Seeding chA with remembered borrowing and restarting the manager")
-		seedCohortAndRestart("chA", "5", hbFairSharing(time.Second, time.Hour))
+		ginkgo.By("Seeding ch-a with remembered borrowing and restarting the manager")
+		seedCohortAndRestart("ch-a", "5", hbFairSharing(time.Second, time.Hour))
 
-		ginkgo.By("Filling lender to leave 2 cpu of contended capacity")
-		createWorkloads("lender", 4, "1")
-		expectReserving("lender", 4)
+		ginkgo.By("Queueing equal demand on cq-a and cq-b while lender holds all capacity")
+		queueBehindLender(lender, "cq-b", "cq-a")
 
-		ginkgo.By("Submitting equal demand to cqA and cqB; the idle cohort's cqB wins")
-		createWorkloads("cqB", 3, "1")
-		createWorkloads("cqA", 3, "1")
+		ginkgo.By("Freeing 2 cpu one at a time; the idle cohort's cq-b wins both")
+		integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 1)
+		expectReserving("cq-b", 1)
+		integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 1)
 		gomega.Eventually(func(g gomega.Gomega) {
 			cqA := &kueue.ClusterQueue{}
 			cqB := &kueue.ClusterQueue{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cqA"}, cqA)).To(gomega.Succeed())
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cqB"}, cqB)).To(gomega.Succeed())
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cq-a"}, cqA)).To(gomega.Succeed())
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cq-b"}, cqB)).To(gomega.Succeed())
 			g.Expect(cqB.Status.ReservingWorkloads).To(gomega.Equal(int32(2)))
 			g.Expect(cqA.Status.ReservingWorkloads).To(gomega.Equal(int32(0)))
 		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
 		gomega.Consistently(func(g gomega.Gomega) {
 			cq := &kueue.ClusterQueue{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cqA"}, cq)).To(gomega.Succeed())
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cq-a"}, cq)).To(gomega.Succeed())
 			g.Expect(cq.Status.ReservingWorkloads).To(gomega.Equal(int32(0)))
 		}, behavioral.ConsistentDuration, behavioral.Interval).Should(gomega.Succeed())
 	})
@@ -389,18 +410,16 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 
 		createQueue(cpuQueue("a", "all", "1").Obj())
 		createQueue(cpuQueue("b", "all", "1").Obj())
-		createQueue(cpuQueue("lender", "all", "4").Obj())
+		lender := createQueue(cpuQueue("lender", "all", "4").Obj())
 
 		ginkgo.By("Seeding a with remembered borrowing and restarting the manager")
 		seedAndRestart("a", "5", hbFairSharing(time.Second, time.Hour, 0))
 
-		ginkgo.By("Filling lender to leave 2 cpu of contended capacity")
-		createWorkloads("lender", 4, "1")
-		expectReserving("lender", 4)
+		ginkgo.By("Queueing equal demand on a and b while lender holds all capacity")
+		queueBehindLender(lender, "b", "a")
 
-		ginkgo.By("Submitting equal demand; with k=0 a and b split the capacity equally")
-		createWorkloads("b", 3, "1")
-		createWorkloads("a", 3, "1")
+		ginkgo.By("Freeing 2 cpu; with k=0 a and b split it equally")
+		integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 2)
 		expectReserving("a", 1)
 		expectReserving("b", 1)
 	})
@@ -586,7 +605,7 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 			ReclaimWithinCohort: kueue.PreemptionPolicyAny,
 			WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
 		}
-		createQueue(cpuQueue("a", "all", "1").Preemption(preemption).Obj())
+		cqA := createQueue(cpuQueue("a", "all", "1").Preemption(preemption).Obj())
 		createQueue(cpuQueue("b", "all", "1").Preemption(preemption).Obj())
 		createQueue(cpuQueue("lender", "all", "4").Obj())
 
@@ -595,35 +614,31 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 		ginkgo.By("Seeding a with remembered borrowing and restarting the manager")
 		seedAndRestart("a", "5", hbFairSharing(time.Second, time.Hour))
 
-		// lender fills its own 4 cpu (no borrowing); a then borrows the
-		// remaining 2 cpu of cohort capacity, including b's idle nominal quota.
-		ginkgo.By("Filling lender and letting a borrow the remaining capacity")
-		createWorkloads("lender", 4, "1")
-		expectReserving("lender", 4)
-		hbAStart := len(wls)
+		// lender leaves 1 cpu of its nominal quota idle for a to borrow, and b
+		// runs within its nominal quota, filling the cohort.
+		ginkgo.By("Filling the cohort: lender 3, a 2 (borrowing 1), b 1")
+		createWorkloads("lender", 3, "1")
+		expectReserving("lender", 3)
 		createWorkloads("a", 2, "1")
 		expectReserving("a", 2)
-		hbAWl := wls[hbAStart]
+		createWorkloads("b", 1, "1")
+		expectReserving("b", 1)
 
-		// b needs more than its nominal quota (borrowing), so fair-sharing
-		// preemption (not nominal reclamation) selects a as the victim based on
-		// its remembered borrowing share.
+		// b's next workload makes it borrow 1 cpu, as much as a borrows now, so
+		// neither fair-sharing strategy would preempt a on current borrowing
+		// alone; a's remembered borrowing makes it the victim.
 		ginkgo.By("b borrows and preempts a via fair sharing")
-		wlB := utiltestingapi.MakeWorkload("b-reclaim", ns.Name).
-			Queue("b").
-			Request(corev1.ResourceCPU, "2").
-			Obj()
-		wls = append(wls, wlB)
-		behavioral.MustCreate(ctx, k8sClient, wlB)
-
-		behavioral.ExpectPreemptedWorkloadsTotalMetric("b", "InCohortFairSharing", 2)
-		behavioral.ExpectWorkloadsToBePreempted(ctx, k8sClient, hbAWl)
+		createWorkloads("b", 1, "1")
+		behavioral.ExpectPreemptedWorkloadsTotalMetric("b", "InCohortFairSharing", 1)
+		integration.FinishEvictionOfWorkloadsInCQ(ctx, k8sClient, cqA, 1)
+		expectReserving("b", 2)
+		expectReserving("a", 1)
 	})
 
 	ginkgo.It("preempts a remembered borrowing cohort to reclaim capacity", func() {
 		// Cohort analogue of the ClusterQueue preemption spec: the seeded history
-		// lives on chA, so chA's inflated dominant resource share must make its
-		// member CQ the fair-sharing victim when the idle sibling reclaims.
+		// lives on ch-a, so ch-a's inflated dominant resource share must make its
+		// member CQ the fair-sharing victim when the sibling cohort borrows.
 		startHB(hbFairSharing(time.Second, time.Hour))
 		createFlavor()
 
@@ -632,32 +647,28 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 			WithinClusterQueue:  kueue.PreemptionPolicyLowerPriority,
 		}
 		createCohort(utiltestingapi.MakeCohort("root").Obj())
-		createCohort(utiltestingapi.MakeCohort("chA").Parent("root").Obj())
-		createCohort(utiltestingapi.MakeCohort("chB").Parent("root").Obj())
-		createQueue(cpuQueue("cqA", "chA", "1").Preemption(preemption).Obj())
-		createQueue(cpuQueue("cqB", "chB", "1").Preemption(preemption).Obj())
+		createCohort(utiltestingapi.MakeCohort("ch-a").Parent("root").Obj())
+		createCohort(utiltestingapi.MakeCohort("ch-b").Parent("root").Obj())
+		cqA := createQueue(cpuQueue("cq-a", "ch-a", "1").Preemption(preemption).Obj())
+		createQueue(cpuQueue("cq-b", "ch-b", "1").Preemption(preemption).Obj())
 		createQueue(cpuQueue("lender", "root", "4").Obj())
 
-		ginkgo.By("Seeding chA with remembered borrowing and restarting the manager")
-		seedCohortAndRestart("chA", "5", hbFairSharing(time.Second, time.Hour))
+		ginkgo.By("Seeding ch-a with remembered borrowing and restarting the manager")
+		seedCohortAndRestart("ch-a", "5", hbFairSharing(time.Second, time.Hour))
 
-		ginkgo.By("Filling lender and letting cqA borrow the remaining capacity")
-		createWorkloads("lender", 4, "1")
-		expectReserving("lender", 4)
-		hbAStart := len(wls)
-		createWorkloads("cqA", 2, "1")
-		expectReserving("cqA", 2)
-		hbAWl := wls[hbAStart]
+		ginkgo.By("Filling the cohort: lender 3, cq-a 2 (borrowing 1), cq-b 1")
+		createWorkloads("lender", 3, "1")
+		expectReserving("lender", 3)
+		createWorkloads("cq-a", 2, "1")
+		expectReserving("cq-a", 2)
+		createWorkloads("cq-b", 1, "1")
+		expectReserving("cq-b", 1)
 
-		ginkgo.By("cqB borrows and preempts cqA via fair sharing")
-		wlB := utiltestingapi.MakeWorkload("b-reclaim", ns.Name).
-			Queue("cqB").
-			Request(corev1.ResourceCPU, "2").
-			Obj()
-		wls = append(wls, wlB)
-		behavioral.MustCreate(ctx, k8sClient, wlB)
-
-		behavioral.ExpectPreemptedWorkloadsTotalMetric("cqB", "InCohortFairSharing", 2)
-		behavioral.ExpectWorkloadsToBePreempted(ctx, k8sClient, hbAWl)
+		ginkgo.By("cq-b borrows and preempts cq-a via fair sharing")
+		createWorkloads("cq-b", 1, "1")
+		behavioral.ExpectPreemptedWorkloadsTotalMetric("cq-b", "InCohortFairSharing", 1)
+		integration.FinishEvictionOfWorkloadsInCQ(ctx, k8sClient, cqA, 1)
+		expectReserving("cq-b", 2)
+		expectReserving("cq-a", 1)
 	})
 })
