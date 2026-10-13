@@ -1590,6 +1590,17 @@ weight of zero and is borrowing, this will return
 9223372036854775807, the maximum possible share value.</p>
 </td>
 </tr>
+<tr><td><code>historicalBorrowingStatus</code><br/>
+<a href="#kueue-x-k8s-io-v1beta2-HistoricalBorrowingStatus"><code>HistoricalBorrowingStatus</code></a>
+</td>
+<td>
+   <p>historicalBorrowingStatus holds the decayed borrowing average used by the
+HistoricalBorrowing fair sharing strategy. It is managed by Kueue and only
+populated when the HistoricalBorrowingFairSharing feature gate is enabled and
+fairSharing.strategy is HistoricalBorrowing. It is persisted so the decayed
+average survives controller restarts and should not be edited by clients.</p>
+</td>
+</tr>
 </tbody>
 </table>
 
@@ -1742,6 +1753,47 @@ There could be up to 64 resources.</p>
 </td>
 <td>
    <p>resources lists the quota usage for the resources in this flavor.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `HistoricalBorrowingStatus`     {#kueue-x-k8s-io-v1beta2-HistoricalBorrowingStatus}
+    
+
+**Appears in:**
+
+- [FairSharingStatus](#kueue-x-k8s-io-v1beta2-FairSharingStatus)
+
+
+<p>HistoricalBorrowingStatus holds the persisted, half-life decayed borrowing
+average per resource name.</p>
+<p>After a gap without samples (for example while the controller is down), the
+next sample weighs the borrowing observed at that moment by the whole gap, as
+admission fair sharing does for usage. An object deleted and recreated with
+the same name in quick succession may inherit the previous object's history.</p>
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>borrowedResources</code> <B>[Required]</B><br/>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcelist-v1-core"><code>k8s.io/api/core/v1.ResourceList</code></a>
+</td>
+<td>
+   <p>borrowedResources is the decayed borrowing average per resource name, in the
+same units as the resource's quota.</p>
+</td>
+</tr>
+<tr><td><code>lastUpdate</code> <B>[Required]</B><br/>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta"><code>k8s.io/apimachinery/pkg/apis/meta/v1.Time</code></a>
+</td>
+<td>
+   <p>lastUpdate is the time borrowedResources was last sampled. It is used to
+apply decay for the elapsed time since the previous sample, including time
+the controller was not running.</p>
 </td>
 </tr>
 </tbody>

@@ -48,11 +48,11 @@ type DRS struct {
 	fairWeight       float64
 	unweightedRatio  float64
 	dominantResource corev1.ResourceName
-	// borrowing tracks whether the node's current usage
-	// exceeds its quota for any resource.
+	// borrowing tracks whether the node currently uses more than its quota on
+	// any resource. Remembered borrowing (HistoricalBorrowing strategy) only
+	// raises unweightedRatio and never sets it.
 	borrowing bool
-	// borrowedFRs records which FlavorResources the node is
-	// currently borrowing on.
+	// borrowedFRs records the FlavorResources the node currently borrows on.
 	borrowedFRs []resources.FlavorResource
 }
 
@@ -63,12 +63,14 @@ func NegativeDRS() DRS {
 
 // IsZero returns whether the DRS unweighted ratio is 0, which is also the
 // case for a node borrowing only what its Cohort has nothing lendable for.
+// Under the HistoricalBorrowing strategy the unweighted ratio also accounts for
+// remembered borrowing, so IsZero can be false even when current usage is below
+// quota.
 func (d DRS) IsZero() bool {
 	return d.unweightedRatio == 0
 }
 
-// IsBorrowing returns whether the node's current usage exceeds
-// its quota for any resource.
+// IsBorrowing returns whether the node currently borrows on any resource.
 func (d DRS) IsBorrowing() bool {
 	return d.borrowing
 }
@@ -174,10 +176,15 @@ func dominantResourceShare(node dominantResourceShareNode, wlReq resources.Flavo
 			borrowedFRs = append(borrowedFRs, fr)
 		}
 	}
+	// Under the HistoricalBorrowing strategy, remembered borrowing raises the
+	// ratio before the no-borrowing short-circuit, so a node that borrowed
+	// recently still has a non-zero share. It does not mark the node as
+	// borrowing. No-op otherwise.
+	history := historicalBorrowingTerms(node, borrowing)
 	if len(borrowing) == 0 {
 		return drs
 	}
-	drs.borrowing = true
+	drs.borrowing = len(borrowedFRs) > 0
 	drs.borrowedFRs = borrowedFRs
 
 	// Maintained by updateCohortLendable alongside SubtreeQuota. The parent is
@@ -185,7 +192,7 @@ func dominantResourceShare(node dominantResourceShareNode, wlReq resources.Flavo
 	lendable := node.parentHRN().getResourceNode().Lendable
 	for rName, b := range borrowing {
 		if lr := lendable[rName]; lr.CmpInt64(0) > 0 {
-			ratio := b.PerThousandOf(lr)
+			ratio := b.PerThousandOf(lr) + historicalPerThousand(history[rName], lr)
 			// Use alphabetical order to get a deterministic resource name.
 			if ratio > drs.unweightedRatio || (ratio == drs.unweightedRatio && rName < drs.dominantResource) {
 				drs.unweightedRatio = ratio

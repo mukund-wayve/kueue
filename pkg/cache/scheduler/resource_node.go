@@ -53,6 +53,23 @@ type resourceNode struct {
 	// previous map never observes a change. Served directly to callers, which
 	// must not mutate it.
 	Lendable map[corev1.ResourceName]resources.Amount
+	// HistoricalBorrowing holds decayed borrowing per resource name when the
+	// HistoricalBorrowing DRS strategy is enabled. It is kept at resource-name
+	// granularity (rather than per flavor resource) so that it round-trips
+	// identically with the persisted status, which is a corev1.ResourceList.
+	// Values are in accounting units (milliCPU for cpu, whole units otherwise)
+	// and kept in float64 so sub-unit per-tick contributions are not truncated.
+	// It is left nil and allocated lazily on first write, so nodes that never
+	// use the strategy carry no extra map.
+	HistoricalBorrowing map[corev1.ResourceName]float64
+	// BorrowingHistoryWeight (k) scales how much HistoricalBorrowing contributes
+	// to the dominant resource share: effective borrowing is
+	// currentBorrowing + BorrowingHistoryWeight*HistoricalBorrowing. It is set
+	// from the cache config whenever the EMA map is touched (seed/sample), so any
+	// node with a non-empty EMA carries the configured k, and Clone propagates it
+	// to snapshots. It is zero (and unused, since HistoricalBorrowing is empty)
+	// when the strategy is inactive.
+	BorrowingHistoryWeight float64
 }
 
 func NewResourceNode() resourceNode {
@@ -67,10 +84,12 @@ func NewResourceNode() resourceNode {
 // Quota, SubtreeQuota and Lendable (these are replaced with new maps upon update).
 func (r resourceNode) Clone() resourceNode {
 	return resourceNode{
-		Quotas:       r.Quotas,
-		SubtreeQuota: r.SubtreeQuota,
-		Usage:        maps.Clone(r.Usage),
-		Lendable:     r.Lendable,
+		Quotas:                 r.Quotas,
+		SubtreeQuota:           r.SubtreeQuota,
+		Usage:                  maps.Clone(r.Usage),
+		Lendable:               r.Lendable,
+		HistoricalBorrowing:    maps.Clone(r.HistoricalBorrowing),
+		BorrowingHistoryWeight: r.BorrowingHistoryWeight,
 	}
 }
 

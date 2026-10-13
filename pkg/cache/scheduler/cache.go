@@ -191,6 +191,7 @@ type Cache struct {
 	lqMetrics    *metrics.LocalQueueMetricsConfig
 
 	simulatorFactory simulator.Factory
+	hb               historicalBorrowingState
 }
 
 func New(client client.Client, options ...Option) *Cache {
@@ -490,6 +491,7 @@ func (c *Cache) AddClusterQueue(ctx context.Context, cq *kueue.ClusterQueue) err
 	if err != nil {
 		return err
 	}
+	c.loadHistoricalBorrowingOnAddLocked(historicalSeededKey("cq", cq.Name), cqImpl, &cqImpl.resourceNode, cq.Status.FairSharing)
 
 	// On controller restart, an add ClusterQueue event may come after
 	// add queue and workload, so here we explicitly list and add existing queues
@@ -659,6 +661,7 @@ func (c *Cache) DeleteClusterQueue(cq *kueue.ClusterQueue) {
 	parent := curCq.Parent()
 
 	c.hm.DeleteClusterQueue(cqName)
+	delete(c.hb.lastSample, historicalSeededKey("cq", string(cqName)))
 	metrics.ClearCacheMetrics(cq.Name)
 	if features.Enabled(features.MetricsForCohorts) {
 		metrics.ClearClusterQueueInfo(cqName)
@@ -679,6 +682,7 @@ func (c *Cache) AddOrUpdateCohort(apiCohort *kueue.Cohort) error {
 	cohortName := kueue.CohortReference(apiCohort.Name)
 	c.hm.AddCohort(cohortName)
 	cohort := c.hm.Cohort(cohortName)
+	c.loadHistoricalBorrowingOnAddLocked(historicalSeededKey("cohort", apiCohort.Name), cohort, &cohort.resourceNode, apiCohort.Status.FairSharing)
 	wasCyclic := hierarchy.HasCycle(cohort)
 	oldParent := cohort.Parent()
 	c.hm.UpdateCohortEdge(cohortName, apiCohort.Spec.ParentName)
@@ -718,6 +722,7 @@ func (c *Cache) DeleteCohort(cohortName kueue.CohortReference) {
 	}
 
 	c.hm.DeleteCohort(cohortName)
+	c.forgetCohortHistoricalBorrowingLocked(cohortName)
 
 	// If the cohort still exists after deletion, it means
 	// that it has one or more children referencing it.

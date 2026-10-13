@@ -652,6 +652,20 @@ must be named tls.key and tls.crt, respectively.</p>
 </tbody>
 </table>
 
+## `DRSStrategy`     {#config-kueue-x-k8s-io-v1beta2-DRSStrategy}
+    
+(Alias of `string`)
+
+**Appears in:**
+
+- [FairSharing](#config-kueue-x-k8s-io-v1beta2-FairSharing)
+
+
+<p>DRSStrategy selects the data source for the dominant resource share score.</p>
+
+
+
+
 ## `DeviceClassCapacitySource`     {#config-kueue-x-k8s-io-v1beta2-DeviceClassCapacitySource}
     
 
@@ -907,6 +921,91 @@ newest start time first.</li>
 <li>[&quot;LessThanOrEqualToFinalShare&quot;, &quot;LessThanInitialShare&quot;]</li>
 </ul>
 <p>Any other combination or ordering fails configuration validation.</p>
+</td>
+</tr>
+<tr><td><code>strategy</code><br/>
+<a href="#config-kueue-x-k8s-io-v1beta2-DRSStrategy"><code>DRSStrategy</code></a>
+</td>
+<td>
+   <p>strategy selects what data feeds the dominant resource share (DRS) score
+used for cohort-level ordering and preemption.
+Possible values are:</p>
+<ul>
+<li>Borrowing: the DRS score reflects only instantaneous borrowing, i.e. the
+amount a ClusterQueue or Cohort currently uses above its nominal quota.
+This is the default.</li>
+<li>HistoricalBorrowing: the DRS score reflects a half-life decayed average of
+past borrowing, so a ClusterQueue that borrowed recently keeps paying a
+share penalty for a while after it stops. Requires the
+HistoricalBorrowingFairSharing feature gate to be enabled and
+historicalBorrowing to be set.</li>
+</ul>
+</td>
+</tr>
+<tr><td><code>historicalBorrowing</code><br/>
+<a href="#config-kueue-x-k8s-io-v1beta2-HistoricalBorrowingConfig"><code>HistoricalBorrowingConfig</code></a>
+</td>
+<td>
+   <p>historicalBorrowing configures the half-life decay for cohort-level
+historical borrowing. It is required when strategy is HistoricalBorrowing and
+must be unset otherwise.</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## `HistoricalBorrowingConfig`     {#config-kueue-x-k8s-io-v1beta2-HistoricalBorrowingConfig}
+    
+
+**Appears in:**
+
+- [FairSharing](#config-kueue-x-k8s-io-v1beta2-FairSharing)
+
+
+
+<table class="table">
+<thead><tr><th width="30%">Field</th><th>Description</th></tr></thead>
+<tbody>
+    
+  
+<tr><td><code>borrowingHalfLifeTime</code> <B>[Required]</B><br/>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta"><code>k8s.io/apimachinery/pkg/apis/meta/v1.Duration</code></a>
+</td>
+<td>
+   <p>borrowingHalfLifeTime is the time after which a past borrowing sample
+contributes half as much to the decayed borrowing average. Larger values
+make the share penalty fade more slowly after borrowing stops.
+Saved history is reused when the strategy is enabled again; clear
+status.fairSharing.historicalBorrowingStatus to start fresh.
+Must be greater than zero. Required when strategy is HistoricalBorrowing.</p>
+</td>
+</tr>
+<tr><td><code>borrowingSamplingInterval</code> <B>[Required]</B><br/>
+<a href="https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta"><code>k8s.io/apimachinery/pkg/apis/meta/v1.Duration</code></a>
+</td>
+<td>
+   <p>borrowingSamplingInterval is how often the controller samples current
+borrowing and folds it into the decayed borrowing average.
+Must be at least 1s. Required when strategy is HistoricalBorrowing.</p>
+</td>
+</tr>
+<tr><td><code>borrowingHistoryWeight</code><br/>
+<code>float64</code>
+</td>
+<td>
+   <p>borrowingHistoryWeight (k) controls how strongly past borrowing influences
+the dominant resource share relative to instantaneous borrowing. The
+effective borrowing used for the DRS score is
+currentBorrowing + borrowingHistoryWeight<em>decayedBorrowing.
+A higher value makes a ClusterQueue that borrowed recently yield harder to
+others, so light or new borrowers catch up faster; 0 disables the
+historical contribution entirely (equivalent to the Borrowing strategy).
+For example, take a CQ that has stopped borrowing but whose decayed
+borrowing average is still H: k=1 scores it as if it were borrowing H now,
+k=4 as if 4</em>H, and k=9 as if 9*H. So at equal current borrowing, raising k
+deprioritizes a past borrower more strongly (k=9 ~9x the residual penalty
+of k=1) and lets others catch up proportionally faster.
+Must be greater than or equal to zero. Defaults to 1.</p>
 </td>
 </tr>
 </tbody>

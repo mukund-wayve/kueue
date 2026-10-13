@@ -132,6 +132,10 @@ func SetupControllers(mgr ctrl.Manager, qManager *qcache.Manager, cc *schdcache.
 		return "Workload", err
 	}
 
+	if failedCtrl, err := setupHistoricalBorrowingControllers(mgr, cc, cfg); err != nil {
+		return failedCtrl, err
+	}
+
 	if opts.ResourceSliceAPIAvailable {
 		rsRec := NewResourceSliceReconciler(qManager, cc, cfg, opts.RoleTracker)
 		if err := rsRec.SetupWithManager(mgr, cfg); err != nil {

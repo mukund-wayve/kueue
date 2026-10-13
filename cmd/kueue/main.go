@@ -356,6 +356,7 @@ func main() {
 	}
 	if cfg.FairSharing != nil {
 		cacheOptions = append(cacheOptions, schdcache.WithFairSharing(fairsharing.Enabled(cfg.FairSharing)))
+		cacheOptions = append(cacheOptions, schdcache.HistoricalBorrowingOption(cfg.FairSharing))
 	}
 	if cfg.AdmissionFairSharing != nil {
 		queueOptions = append(queueOptions, qcache.WithAdmissionFairSharing(cfg.AdmissionFairSharing))

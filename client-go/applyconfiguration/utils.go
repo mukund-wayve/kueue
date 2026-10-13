@@ -142,6 +142,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &kueuev1beta2.FlavorQuotasApplyConfiguration{}
 	case v1beta2.SchemeGroupVersion.WithKind("FlavorUsage"):
 		return &kueuev1beta2.FlavorUsageApplyConfiguration{}
+	case v1beta2.SchemeGroupVersion.WithKind("HistoricalBorrowingStatus"):
+		return &kueuev1beta2.HistoricalBorrowingStatusApplyConfiguration{}
 	case v1beta2.SchemeGroupVersion.WithKind("KubeConfig"):
 		return &kueuev1beta2.KubeConfigApplyConfiguration{}
 	case v1beta2.SchemeGroupVersion.WithKind("LocalQueue"):

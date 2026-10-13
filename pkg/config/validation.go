@@ -454,6 +454,7 @@ func validateFairSharing(c *configapi.Configuration) field.ErrorList {
 			allErrs = append(allErrs, field.NotSupported(fsPreemptionStrategiesPath, fs.PreemptionStrategies, validStrategySetsStr))
 		}
 	}
+	allErrs = append(allErrs, validateFairSharingStrategy(fs)...)
 	return allErrs
 }
 

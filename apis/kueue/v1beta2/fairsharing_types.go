@@ -17,7 +17,9 @@ limitations under the License.
 package v1beta2
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // FairSharing contains the properties of the ClusterQueue or Cohort,
@@ -50,6 +52,34 @@ type FairSharingStatus struct {
 	// 9223372036854775807, the maximum possible share value.
 	// +required
 	WeightedShare int64 `json:"weightedShare"`
+
+	// historicalBorrowingStatus holds the decayed borrowing average used by the
+	// HistoricalBorrowing fair sharing strategy. It is managed by Kueue and only
+	// populated when the HistoricalBorrowingFairSharing feature gate is enabled and
+	// fairSharing.strategy is HistoricalBorrowing. It is persisted so the decayed
+	// average survives controller restarts and should not be edited by clients.
+	// +optional
+	HistoricalBorrowingStatus *HistoricalBorrowingStatus `json:"historicalBorrowingStatus,omitempty"`
+}
+
+// HistoricalBorrowingStatus holds the persisted, half-life decayed borrowing
+// average per resource name.
+//
+// After a gap without samples (for example while the controller is down), the
+// next sample weighs the borrowing observed at that moment by the whole gap, as
+// admission fair sharing does for usage. An object deleted and recreated with
+// the same name in quick succession may inherit the previous object's history.
+type HistoricalBorrowingStatus struct {
+	// borrowedResources is the decayed borrowing average per resource name, in the
+	// same units as the resource's quota.
+	// +required
+	BorrowedResources corev1.ResourceList `json:"borrowedResources"`
+
+	// lastUpdate is the time borrowedResources was last sampled. It is used to
+	// apply decay for the elapsed time since the previous sample, including time
+	// the controller was not running.
+	// +required
+	LastUpdate metav1.Time `json:"lastUpdate"`
 }
 
 type AdmissionScope struct {

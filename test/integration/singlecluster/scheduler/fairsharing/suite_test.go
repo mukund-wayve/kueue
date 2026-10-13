@@ -152,6 +152,84 @@ func managerAndSchedulerSetup(
 	}
 }
 
+// managerAndSchedulerSetupWithFairSharing is the historical-borrowing variant
+// that accepts an explicit FairSharing config. It is kept separate so the
+// upstream managerAndSchedulerSetup helper stays unchanged.
+func managerAndSchedulerSetupWithFairSharing(
+	fairSharing *config.FairSharing,
+	admissionFairSharing *config.AdmissionFairSharing,
+	mappings ...[]config.DeviceClassMapping,
+) framework.ManagerSetup {
+	return func(ctx context.Context, mgr manager.Manager) {
+		err := indexer.Setup(ctx, mgr.GetFieldIndexer())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		var deviceClassMappings []config.DeviceClassMapping
+		var draMapper *dra.ResourceMapper
+		if len(mappings) > 0 {
+			deviceClassMappings = mappings[0]
+			draMapper = dra.NewResourceMapper()
+			err = draMapper.PopulateFromConfiguration(deviceClassMappings)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+
+		cCache := schdcache.New(
+			mgr.GetClient(),
+			schdcache.WithFairSharing(fairsharing.Enabled(fairSharing)),
+			schdcache.WithAdmissionFairSharing(admissionFairSharing),
+			schdcache.HistoricalBorrowingOption(fairSharing),
+		)
+		preemptionExpectations := preemptexpectations.New()
+		queueOptions := []qcache.Option{}
+		queueOptions = append(queueOptions, qcache.WithAdmissionFairSharing(admissionFairSharing))
+		queueOptions = append(queueOptions, qcache.WithPreemptionExpectations(preemptionExpectations))
+		queues := integration.NewManager(ctx, mgr.GetClient(), cCache, queueOptions...)
+		qManager = queues
+
+		configuration := &config.Configuration{
+			Namespace:            new("kueue-system"),
+			FairSharing:          fairSharing,
+			AdmissionFairSharing: admissionFairSharing,
+		}
+		if len(deviceClassMappings) > 0 {
+			configuration.Resources = &config.Resources{
+				DeviceClassMappings: deviceClassMappings,
+			}
+		}
+		configuration.Metrics.EnableClusterQueueResources = true
+		mgr.GetScheme().Default(configuration)
+
+		failedCtrl, err := core.SetupControllers(
+			mgr,
+			queues,
+			cCache,
+			configuration,
+			core.SetupControllersOpts{PreemptionExpectations: preemptionExpectations, DRAMapper: draMapper},
+		)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "controller", failedCtrl)
+
+		failedWebhook, err := webhooks.Setup(mgr, nil)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred(), "webhook", failedWebhook)
+
+		err = workloadjob.SetupIndexes(ctx, mgr.GetFieldIndexer())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		sched := scheduler.New(
+			queues,
+			cCache,
+			mgr.GetClient(),
+			mgr.GetEventRecorder(constants.AdmissionName),
+			scheduler.WithFairSharing(
+				fairSharing,
+			),
+			scheduler.WithAdmissionFairSharing(admissionFairSharing),
+			scheduler.WithPreemptionExpectations(preemptionExpectations),
+		)
+		err = sched.Start(ctx)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	}
+}
+
 func afsConfig(samplingInterval, halfLifeTime metav1.Duration) *config.AdmissionFairSharing {
 	return &config.AdmissionFairSharing{
 		UsageSamplingInterval: samplingInterval,
