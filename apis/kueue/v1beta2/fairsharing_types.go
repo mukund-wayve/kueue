@@ -64,6 +64,11 @@ type FairSharingStatus struct {
 
 // HistoricalBorrowingStatus holds the persisted, half-life decayed borrowing
 // average per resource name.
+//
+// After a gap without samples (for example while the controller is down), the
+// next sample weighs the borrowing observed at that moment by the whole gap, as
+// admission fair sharing does for usage. An object deleted and recreated with
+// the same name in quick succession may inherit the previous object's history.
 type HistoricalBorrowingStatus struct {
 	// borrowedResources is the decayed borrowing average per resource name, in the
 	// same units as the resource's quota.

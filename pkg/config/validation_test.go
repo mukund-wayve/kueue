@@ -1140,6 +1140,40 @@ func TestValidate(t *testing.T) {
 				},
 			},
 		},
+		"historical borrowing rejects borrowingSamplingInterval below 1s": {
+			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
+						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
+						BorrowingSamplingInterval: metav1.Duration{Duration: 500 * time.Millisecond},
+					},
+				},
+			},
+			wantErr: field.ErrorList{
+				&field.Error{
+					Type:  field.ErrorTypeInvalid,
+					Field: "fairSharing.historicalBorrowing.borrowingSamplingInterval",
+				},
+			},
+		},
+		"valid historical borrowing with 1s borrowingSamplingInterval": {
+			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
+			cfg: &configapi.Configuration{
+				Integrations: defaultIntegrations,
+				FairSharing: &configapi.FairSharing{
+					PreemptionStrategies: []configapi.PreemptionStrategy{configapi.LessThanInitialShare},
+					Strategy:             configapi.DRSStrategyHistoricalBorrowing,
+					HistoricalBorrowing: &configapi.HistoricalBorrowingConfig{
+						BorrowingHalfLifeTime:     metav1.Duration{Duration: time.Hour},
+						BorrowingSamplingInterval: metav1.Duration{Duration: time.Second},
+					},
+				},
+			},
+		},
 		"valid historical borrowing with explicit borrowingHistoryWeight": {
 			featureGates: map[featuregate.Feature]bool{features.HistoricalBorrowingFairSharing: true},
 			cfg: &configapi.Configuration{

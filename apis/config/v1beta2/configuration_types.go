@@ -853,12 +853,14 @@ type HistoricalBorrowingConfig struct {
 	// borrowingHalfLifeTime is the time after which a past borrowing sample
 	// contributes half as much to the decayed borrowing average. Larger values
 	// make the share penalty fade more slowly after borrowing stops.
+	// Saved history is reused when the strategy is enabled again; clear
+	// status.fairSharing.historicalBorrowingStatus to start fresh.
 	// Must be greater than zero. Required when strategy is HistoricalBorrowing.
 	BorrowingHalfLifeTime metav1.Duration `json:"borrowingHalfLifeTime"`
 
 	// borrowingSamplingInterval is how often the controller samples current
 	// borrowing and folds it into the decayed borrowing average.
-	// Must be greater than zero. Required when strategy is HistoricalBorrowing.
+	// Must be at least 1s. Required when strategy is HistoricalBorrowing.
 	BorrowingSamplingInterval metav1.Duration `json:"borrowingSamplingInterval"`
 
 	// borrowingHistoryWeight (k) controls how strongly past borrowing influences

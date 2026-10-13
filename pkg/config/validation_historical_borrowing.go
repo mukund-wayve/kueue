@@ -18,6 +18,7 @@ package config
 
 import (
 	"math"
+	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
@@ -54,9 +55,12 @@ func validateFairSharingStrategy(fs *configapi.FairSharing) field.ErrorList {
 				allErrs = append(allErrs, field.Required(fsHistoricalBorrowingPath.Child("borrowingHalfLifeTime"),
 					"required when strategy is HistoricalBorrowing"))
 			}
-			if hb.BorrowingSamplingInterval.Duration <= 0 {
+			if d := hb.BorrowingSamplingInterval.Duration; d <= 0 {
 				allErrs = append(allErrs, field.Required(fsHistoricalBorrowingPath.Child("borrowingSamplingInterval"),
 					"required when strategy is HistoricalBorrowing"))
+			} else if d < time.Second {
+				allErrs = append(allErrs, field.Invalid(fsHistoricalBorrowingPath.Child("borrowingSamplingInterval"),
+					hb.BorrowingSamplingInterval.String(), "must be at least 1s"))
 			}
 			if k := hb.BorrowingHistoryWeight; k != nil && (*k < 0 || math.IsNaN(*k) || math.IsInf(*k, 0)) {
 				allErrs = append(allErrs, field.Invalid(fsHistoricalBorrowingPath.Child("borrowingHistoryWeight"),

@@ -48,34 +48,21 @@ func borrowingAlphaRate(elapsedSeconds, halfLifeSeconds float64) float64 {
 	return 1.0 - math.Pow(0.5, elapsedSeconds/halfLifeSeconds)
 }
 
-// currentBorrowingFR returns the node's instantaneous per-FlavorResource
-// borrowing: usage (optionally including a candidate workload request) above
-// quota. During scheduling the candidate workload is already added to Usage via
-// SimulateUsageAddition, so wlReq is usually nil there.
-func currentBorrowingFR(rn resourceNode, wlReq resources.FlavorResourceQuantities) resources.FlavorResourceQuantities {
-	borrowing := make(resources.FlavorResourceQuantities, len(rn.SubtreeQuota))
-	for fr, quota := range rn.SubtreeQuota {
-		amountBorrowed := wlReq[fr].Add(rn.Usage[fr]).Sub(quota)
-		if amountBorrowed.CmpInt64(0) > 0 {
-			borrowing[fr] = amountBorrowed
-		}
-	}
-	return borrowing
-}
-
-// currentBorrowingByResource aggregates instantaneous borrowing across flavors
-// into per-resource-name amounts. This matches the granularity of both the
-// HistoricalBorrowing EMA and the per-resource DRS ratio.
-func currentBorrowingByResource(rn resourceNode, wlReq resources.FlavorResourceQuantities) map[corev1.ResourceName]resources.Amount {
+// currentBorrowingByResource returns the node's instantaneous borrowing (usage
+// above quota) summed across flavors per resource name. This matches the
+// granularity of both the HistoricalBorrowing EMA and the per-resource DRS ratio.
+func currentBorrowingByResource(rn resourceNode) map[corev1.ResourceName]resources.Amount {
 	byResource := make(map[corev1.ResourceName]resources.Amount, len(rn.SubtreeQuota))
-	for fr, amount := range currentBorrowingFR(rn, wlReq) {
-		byResource[fr.Resource] = byResource[fr.Resource].Add(amount)
+	for fr, quota := range rn.SubtreeQuota {
+		if amountBorrowed := rn.Usage[fr].Sub(quota); amountBorrowed.CmpInt64(0) > 0 {
+			byResource[fr.Resource] = byResource[fr.Resource].Add(amountBorrowed)
+		}
 	}
 	return byResource
 }
 
 // historicalBorrowingTerms returns the remembered borrowing that
-// dominantResourceShare adds on top of instantaneous borrowing, as k*EMA per
+// dominantResourceShare adds to the instantaneous borrowing ratio, as k*EMA per
 // resource in accounting units. It returns nil unless the node carries
 // historical data (only populated while the HistoricalBorrowing strategy is
 // active) and k > 0, so the default DRS path is unchanged.
@@ -88,22 +75,17 @@ func currentBorrowingByResource(rn resourceNode, wlReq resources.FlavorResourceQ
 // equal current borrowing and can catch up. k=0 reproduces the plain Borrowing
 // score. The terms stay in float64 so sub-unit history still moves the ratio.
 //
-// Each resource with history is added to borrowing (as zero when not currently
-// borrowed) so the caller's ratio loop visits it, and every flavor of it that is
-// not already counted as currently borrowing is reported as borrowed (the
-// per-resource EMA does not record which flavor the borrowing came from). The
-// extended borrowedFRs is returned.
-func historicalBorrowingTerms(
-	node dominantResourceShareNode,
-	wlReq resources.FlavorResourceQuantities,
-	borrowing map[corev1.ResourceName]resources.Amount,
-	borrowedFRs []resources.FlavorResource,
-) (map[corev1.ResourceName]float64, []resources.FlavorResource) {
+// History only raises the share: it never marks the node as borrowing, so
+// workloads within the node's nominal quota keep their priority. Each resource
+// with history is added to borrowing (as zero when not currently borrowed) so
+// the caller's ratio loop visits it. A node with zero fair weight is skipped:
+// its share is already +Inf when borrowing and 0 otherwise, and history would
+// only turn the latter into +Inf.
+func historicalBorrowingTerms(node dominantResourceShareNode, borrowing map[corev1.ResourceName]resources.Amount) map[corev1.ResourceName]float64 {
 	rn := node.getResourceNode()
-	if len(rn.HistoricalBorrowing) == 0 || rn.BorrowingHistoryWeight == 0 {
-		return nil, borrowedFRs
+	if len(rn.HistoricalBorrowing) == 0 || rn.BorrowingHistoryWeight == 0 || node.fairWeight() == 0 {
+		return nil
 	}
-	currentFR := currentBorrowingFR(rn, wlReq)
 	terms := make(map[corev1.ResourceName]float64, len(rn.HistoricalBorrowing))
 	for r, hist := range rn.HistoricalBorrowing {
 		weighted := rn.BorrowingHistoryWeight * hist
@@ -114,17 +96,8 @@ func historicalBorrowingTerms(
 		if _, ok := borrowing[r]; !ok {
 			borrowing[r] = resources.Amount{}
 		}
-		for fr := range rn.SubtreeQuota {
-			if fr.Resource != r {
-				continue
-			}
-			if _, ok := currentFR[fr]; ok {
-				continue
-			}
-			borrowedFRs = append(borrowedFRs, fr)
-		}
 	}
-	return terms, borrowedFRs
+	return terms
 }
 
 // historicalPerThousand returns the history term h over lendable in thousandths,
@@ -150,7 +123,7 @@ func sampleHistoricalBorrowing(node hierarchicalResourceNode, elapsed, halfLife 
 		return
 	}
 	rn := node.getResourceNode()
-	current := currentBorrowingByResource(rn, nil)
+	current := currentBorrowingByResource(rn)
 	// Iterate the union of currently-borrowed and previously-tracked resources so
 	// each is updated exactly once.
 	resourceNames := sets.New[corev1.ResourceName]()

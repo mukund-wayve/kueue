@@ -19,7 +19,6 @@ package scheduler
 import (
 	"math"
 	"testing"
-	"time"
 
 	kueue "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 	"sigs.k8s.io/kueue/pkg/resources"
@@ -204,7 +203,7 @@ func TestHistoricalBorrowingFreshBorrowerReclaims(t *testing.T) {
 	// cqB is brand new: it is borrowing when first seeded with no status.
 	cqB := cache.hm.ClusterQueue("cqB")
 	addUsage(cqB, cpuFR, cpuCores(catchupPoolCores))
-	cache.EnsureCQHistoricalBorrowingSeeded("cqB", nil, time.Now())
+	loadCQ(cache, "cqB", nil)
 	if got := cqB.getResourceNode().HistoricalBorrowing; len(got) != 0 {
 		t.Fatalf("fresh cqB should seed an empty EMA, got %v", got)
 	}

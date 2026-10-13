@@ -64,7 +64,7 @@ func TestHistoricalBorrowingSeedZeroWhenNoStatus(t *testing.T) {
 	cqImpl := cache.hm.ClusterQueue("cq")
 	addUsage(cqImpl, cpuFR, cpuCores(15))
 
-	cache.EnsureCQHistoricalBorrowingSeeded("cq", nil, time.Now())
+	loadCQ(cache, "cq", nil)
 
 	if got := cqImpl.getResourceNode().HistoricalBorrowing; len(got) != 0 {
 		t.Fatalf("expected empty EMA when seeding without status, got %v", got)
@@ -130,8 +130,8 @@ func TestHistoricalBorrowingAdditiveOfInstantAndHistory(t *testing.T) {
 // borrowingForDRS returns the effective cpu borrowing (current + k*EMA) in
 // milliCPU, as folded into the DRS ratio.
 func borrowingForDRS(node dominantResourceShareNode) float64 {
-	borrowing := currentBorrowingByResource(node.getResourceNode(), nil)
-	terms, _ := historicalBorrowingTerms(node, nil, borrowing, nil)
+	borrowing := currentBorrowingByResource(node.getResourceNode())
+	terms := historicalBorrowingTerms(node, borrowing)
 	return amountFloat64(borrowing[corev1.ResourceCPU]) + terms[corev1.ResourceCPU]
 }
 
@@ -145,7 +145,7 @@ func TestSampleAggregatesMultipleFlavors(t *testing.T) {
 	addUsage(cqImpl, f1, cpuCores(15)) // borrow 5 on f1
 	addUsage(cqImpl, f2, cpuCores(13)) // borrow 3 on f2
 
-	current := currentBorrowingByResource(cqImpl.getResourceNode(), nil)
+	current := currentBorrowingByResource(cqImpl.getResourceNode())
 	if len(current) != 1 || amountI64(current[corev1.ResourceCPU]) != amountI64(cpuCores(8)) {
 		t.Fatalf("expected single aggregated cpu entry of 8 cores, got %v", current)
 	}
@@ -212,8 +212,7 @@ func dayHalfLifeCfg() *configapi.HistoricalBorrowingConfig {
 
 // TestHistoricalBorrowingKeepsSubUnitContributions verifies a one-GPU borrowing
 // contributes alpha*1 GPU to the EMA, and that this sub-unit history still
-// makes the CQ score as borrowing once it stops. An integer EMA truncated it to
-// zero.
+// raises the CQ's share once it stops. An integer EMA truncated it to zero.
 func TestHistoricalBorrowingKeepsSubUnitContributions(t *testing.T) {
 	cache := newGPUCache(t, dayHalfLifeCfg())
 	cqImpl := cache.hm.ClusterQueue("cq")
@@ -226,8 +225,8 @@ func TestHistoricalBorrowingKeepsSubUnitContributions(t *testing.T) {
 	}
 
 	removeUsage(cqImpl, hbGPUFR, resources.NewAmount(1))
-	if drs := dominantResourceShare(cqImpl, nil); drs.IsZero() || !drs.IsBorrowing() {
-		t.Fatalf("expected sub-unit GPU history to count as borrowing, got %+v", drs)
+	if drs := dominantResourceShare(cqImpl, nil); drs.IsZero() {
+		t.Fatalf("expected sub-unit GPU history to raise the share, got %+v", drs)
 	}
 }
 
@@ -258,7 +257,8 @@ func TestHistoricalBorrowingSubUnitRoundTrip(t *testing.T) {
 
 	status := historicalBorrowingStatus(src, time.Now())
 	dst := newGPUCache(t, dayHalfLifeCfg())
-	dst.EnsureCQHistoricalBorrowingSeeded("cq", status, time.Now())
+	status.LastUpdate = metav1.NewTime(time.Now().Add(time.Second))
+	loadCQ(dst, "cq", status)
 
 	got := dst.hm.ClusterQueue("cq").getResourceNode().HistoricalBorrowing
 	if len(got) != 2 || math.Abs(got[corev1.ResourceCPU]-0.5) > 1e-9 || math.Abs(got[hbGPU]-0.25) > 1e-9 {
@@ -273,26 +273,31 @@ func TestHistoricalBorrowingSubUnitRoundTrip(t *testing.T) {
 func TestHistoricalBorrowingSamplingClock(t *testing.T) {
 	t0 := time.Now()
 	interval := historicalBorrowingCfg().BorrowingSamplingInterval.Duration
+	key := historicalSeededKey("cq", "cq")
+	sample := func(c *Cache, at time.Time) time.Duration {
+		_, wait, _ := c.SyncCQHistoricalBorrowing("cq", nil, at, true)
+		return wait
+	}
 
 	t.Run("burst within an interval samples once", func(t *testing.T) {
 		cache := newHistoricalBorrowingCache(t)
 		cqImpl := cache.hm.ClusterQueue("cq")
 		addUsage(cqImpl, cpuFR, cpuCores(15))
-		cache.EnsureCQHistoricalBorrowingSeeded("cq", nil, t0)
+		cache.hb.lastSample[key] = t0
 
-		if _, wait, _ := cache.SampleCQHistoricalBorrowing("cq", t0.Add(interval/2)); wait != interval/2 {
+		if wait := sample(cache, t0.Add(interval/2)); wait != interval/2 {
 			t.Fatalf("wait before the first interval = %v, want %v", wait, interval/2)
 		}
 		if got := cpuHistory(cqImpl.getResourceNode()); got != 0 {
 			t.Fatalf("EMA sampled before the interval elapsed: %v", got)
 		}
 		at := t0.Add(interval)
-		if _, wait, _ := cache.SampleCQHistoricalBorrowing("cq", at); wait != 0 {
+		if wait := sample(cache, at); wait != 0 {
 			t.Fatalf("expected a sample once the interval elapsed, got wait %v", wait)
 		}
 		want := cpuHistory(cqImpl.getResourceNode())
 		for range 5 {
-			if _, wait, _ := cache.SampleCQHistoricalBorrowing("cq", at); wait != interval {
+			if wait := sample(cache, at); wait != interval {
 				t.Fatalf("repeated sample at the same time: wait %v, want %v", wait, interval)
 			}
 		}
@@ -305,9 +310,10 @@ func TestHistoricalBorrowingSamplingClock(t *testing.T) {
 		cache := newHistoricalBorrowingCache(t)
 		status := cpuHistoryStatus(8000)
 		status.LastUpdate = metav1.NewTime(t0.Add(-halfLife))
-		cache.EnsureCQHistoricalBorrowingSeeded("cq", status, t0)
+		delete(cache.hb.lastSample, key)
+		cache.SyncCQHistoricalBorrowing("cq", status, t0, false)
 
-		if _, wait, _ := cache.SampleCQHistoricalBorrowing("cq", t0); wait != 0 {
+		if wait := sample(cache, t0); wait != 0 {
 			t.Fatalf("expected an immediate sample after a restart, got wait %v", wait)
 		}
 		if got := cpuHistory(cache.hm.ClusterQueue("cq").getResourceNode()); got != 4000 {
@@ -319,9 +325,9 @@ func TestHistoricalBorrowingSamplingClock(t *testing.T) {
 		cache := newHistoricalBorrowingCache(t)
 		status := cpuHistoryStatus(8000)
 		status.LastUpdate = metav1.NewTime(t0.Add(time.Hour))
-		cache.EnsureCQHistoricalBorrowingSeeded("cq", status, t0)
+		loadCQ(cache, "cq", status)
 
-		if _, wait, _ := cache.SampleCQHistoricalBorrowing("cq", t0.Add(2*interval)); wait != interval {
+		if wait := sample(cache, t0.Add(2*interval)); wait != interval {
 			t.Fatalf("wait with a future LastUpdate = %v, want %v", wait, interval)
 		}
 		if got := cpuHistory(cache.hm.ClusterQueue("cq").getResourceNode()); got != 8000 {

@@ -24,12 +24,12 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	testingclock "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configapi "sigs.k8s.io/kueue/apis/config/v1beta2"
@@ -94,9 +94,16 @@ func newHBCQFixture(
 	if err := cache.AddClusterQueue(ctx, cq); err != nil {
 		t.Fatalf("AddClusterQueue: %v", err)
 	}
-	r := newHistoricalBorrowingCQReconciler(cl, cache, cfg)
+	r := newHistoricalBorrowingCQReconciler(cl, cache, cfg, electedChan())
 	r.clock = clk
 	return r, cl
+}
+
+// electedChan returns a closed channel: the replica is the leader.
+func electedChan() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }
 
 // cpuFlavorQuotas builds one FlavorQuotas per flavor, each with the given
@@ -290,7 +297,7 @@ func TestHBControllerNodeNotInCacheKeepsStatus(t *testing.T) {
 	cache := schdcache.New(cl, schdcache.WithFairSharing(true), schdcache.WithHistoricalBorrowing(hbControllerCfg()))
 	// Intentionally do NOT add the CQ to the cache, simulating the window after a
 	// restart before the ClusterQueue reconciler has populated it.
-	r := newHistoricalBorrowingCQReconciler(cl, cache, hbControllerCfg())
+	r := newHistoricalBorrowingCQReconciler(cl, cache, hbControllerCfg(), electedChan())
 	r.clock = clk
 
 	res := reconcileCQ(t, r, cq)
@@ -324,44 +331,123 @@ func TestHBControllerClampsNegativeElapsed(t *testing.T) {
 	}
 }
 
-// TestHBControllerConflictDoesNotRepeatDecay verifies that a conflicted status
+// TestHBControllerFailedWriteDoesNotRepeatDecay verifies that a failed status
 // write does not make the next tick re-apply the elapsed time the in-memory EMA
 // already absorbed: the next tick decays only for the time since that sample,
 // not again from the stale persisted LastUpdate.
-func TestHBControllerConflictDoesNotRepeatDecay(t *testing.T) {
+func TestHBControllerFailedWriteDoesNotRepeatDecay(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	clk := testingclock.NewFakeClock(now)
 	cq := makeCQWithCohort("cq").Obj()
 	cq.Status.FairSharing = hbStatus("5", now.Add(-hbHalfLife))
-	conflicts := 1
+	failures := 1
 	r, cl := newHBCQFixture(t, clk, defaultHBCohort(), cq, true, interceptor.Funcs{
-		SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-			if conflicts > 0 {
-				conflicts--
-				return apierrors.NewConflict(kueue.Resource("clusterqueues"), obj.GetName(), errors.New("conflict"))
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if failures > 0 {
+				failures--
+				return errors.New("write failed")
 			}
-			return c.SubResource(subResourceName).Update(ctx, obj, opts...)
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
 		},
 	})
 
-	reconcileCQ(t, r, cq) // 5000m decays to 2500m in memory; the write conflicts.
+	// 5000m decays to 2500m in memory; the write fails.
+	ctx, _ := utiltesting.ContextWithLog(t)
+	if _, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cq)}); err == nil {
+		t.Fatal("expected the failed write to be returned")
+	}
 	clk.Step(hbInterval)
 	reconcileCQ(t, r, cq)
 
 	want := 2500 * math.Pow(0.5, hbInterval.Seconds()/hbHalfLife.Seconds())
 	hb := getCQHistorical(t, cl, "cq")
 	if hb == nil || math.Abs(float64(hb.BorrowedResources.Cpu().MilliValue())-want) > 1 {
-		t.Fatalf("persisted cpu after a conflicted tick = %v, want ~%.0fm", hb, want)
+		t.Fatalf("persisted cpu after a failed tick = %v, want ~%.0fm", hb, want)
 	}
 }
 
-// TestHBControllerEventBurstSamplesOnce verifies a borrowing CQ without a
-// persisted status samples once per interval, however many events trigger a
-// reconcile in between.
+// TestHBControllerSubSecondClockAddsNoDecay verifies sampling runs on whole
+// seconds, so the persisted LastUpdate equals the in-memory sample time and a
+// sub-second clock does not stretch the elapsed time.
+func TestHBControllerSubSecondClockAddsNoDecay(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	clk := testingclock.NewFakeClock(now.Add(500 * time.Millisecond))
+	cq := makeCQWithCohort("cq").Obj()
+	cq.Status.FairSharing = hbStatus("5", now.Add(-hbHalfLife))
+	r, cl := newHBCQFixture(t, clk, defaultHBCohort(), cq, true)
+
+	reconcileCQ(t, r, cq)
+	hb := getCQHistorical(t, cl, "cq")
+	if hb == nil || hb.BorrowedResources.Cpu().MilliValue() != 2500 || !hb.LastUpdate.Equal(&metav1.Time{Time: now}) {
+		t.Fatalf("persisted status = %v, want 2500m at %v", hb, now)
+	}
+}
+
+// TestHBControllerNonLeaderLoadsWithoutWriting verifies a non-leader replica
+// never writes, but follows newer status written by the leader, so that it
+// resumes from the leader's last write once elected.
+func TestHBControllerNonLeaderLoadsWithoutWriting(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	clk := testingclock.NewFakeClock(now)
+	cq := makeCQWithCohort("cq").Obj()
+	cq.Status.FairSharing = hbStatus("5", now.Add(-hbHalfLife))
+	r, cl := newHBCQFixture(t, clk, defaultHBCohort(), cq, true)
+	elected := make(chan struct{})
+	r.elected = elected
+
+	if res := reconcileCQ(t, r, cq); res.RequeueAfter != hbInterval {
+		t.Fatalf("non-leader requeue = %v, want %v", res.RequeueAfter, hbInterval)
+	}
+	if hb := getCQHistorical(t, cl, "cq"); hb.BorrowedResources.Cpu().MilliValue() != 5000 {
+		t.Fatalf("non-leader wrote status: %v", hb)
+	}
+
+	// The leader writes 8 cores now; this replica loads it.
+	ctx, _ := utiltesting.ContextWithLog(t)
+	cq.Status.FairSharing = hbStatus("8", now)
+	if err := cl.Status().Update(ctx, cq); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+	reconcileCQ(t, r, cq)
+
+	// Elected a half-life later, it decays the loaded 8 cores, not the old 5.
+	close(elected)
+	clk.Step(hbHalfLife)
+	reconcileCQ(t, r, cq)
+	if hb := getCQHistorical(t, cl, "cq"); hb.BorrowedResources.Cpu().MilliValue() != 4000 {
+		t.Fatalf("persisted cpu after election = %v, want 4000m", hb)
+	}
+}
+
+// TestHBControllerStatusChangedPredicate verifies only changes to the
+// historical borrowing status pass the update filter.
+func TestHBControllerStatusChangedPredicate(t *testing.T) {
+	r := newHistoricalBorrowingCQReconciler(nil, nil, hbControllerCfg(), electedChan())
+	now := time.Now()
+	base := makeCQWithCohort("cq").Obj()
+	base.Status.FairSharing = hbStatus("5", now)
+
+	specOnly := base.DeepCopy()
+	specOnly.Spec.CohortName = "other"
+	specOnly.Status.FairSharing.WeightedShare = 7
+	if r.historicalStatusChanged(event.UpdateEvent{ObjectOld: base, ObjectNew: specOnly}) {
+		t.Fatal("expected unrelated changes to be filtered out")
+	}
+	written := base.DeepCopy()
+	written.Status.FairSharing = hbStatus("4", now.Add(hbInterval))
+	if !r.historicalStatusChanged(event.UpdateEvent{ObjectOld: base, ObjectNew: written}) {
+		t.Fatal("expected a historical borrowing status change to pass")
+	}
+}
+
+// TestHBControllerEventBurstSamplesOnce verifies a borrowing CQ samples once
+// per interval, however many events trigger a reconcile in between.
 func TestHBControllerEventBurstSamplesOnce(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	clk := testingclock.NewFakeClock(now)
 	cq := cqWithCPU("cq", "0", "default").Obj()
+	// A saved status without borrowing starts the sampling clock at now.
+	cq.Status.FairSharing = hbStatus("0", now)
 	r, cl := newHBCQFixture(t, clk, defaultHBCohort(), cq, true)
 	ctx, log := utiltesting.ContextWithLog(t)
 	r.cache.AddOrUpdateResourceFlavor(log, utiltestingapi.MakeResourceFlavor("default").Obj())
@@ -381,7 +467,7 @@ func TestHBControllerEventBurstSamplesOnce(t *testing.T) {
 	for range 5 {
 		reconcileCQ(t, r, cq)
 	}
-	if hb := getCQHistorical(t, cl, "cq"); hb != nil {
+	if hb := getCQHistorical(t, cl, "cq"); !hb.LastUpdate.Equal(&metav1.Time{Time: now}) {
 		t.Fatalf("expected no sample before the first interval, got %v", hb)
 	}
 	clk.Step(hbInterval)
@@ -414,7 +500,7 @@ func TestHBControllerCohortSamplesAndPersists(t *testing.T) {
 	if err := cache.AddOrUpdateCohort(cohort); err != nil {
 		t.Fatalf("AddOrUpdateCohort: %v", err)
 	}
-	r := newHistoricalBorrowingCohortReconciler(cl, cache, cfg)
+	r := newHistoricalBorrowingCohortReconciler(cl, cache, cfg, electedChan())
 	r.clock = clk
 
 	res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cohort)})

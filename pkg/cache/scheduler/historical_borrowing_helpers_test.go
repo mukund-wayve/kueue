@@ -59,7 +59,7 @@ func sampleCQAfter(c *Cache, name kueue.ClusterQueueReference, elapsed time.Dura
 	now := time.Now()
 	c.initHistoricalBorrowingLastSampleLocked()
 	c.hb.lastSample[historicalSeededKey("cq", string(name))] = now.Add(-elapsed)
-	status, _, found := c.SampleCQHistoricalBorrowing(name, now)
+	status, _, found := c.SyncCQHistoricalBorrowing(name, nil, now, true)
 	return status, found
 }
 
@@ -68,8 +68,18 @@ func sampleCohortAfter(c *Cache, name kueue.CohortReference, elapsed time.Durati
 	now := time.Now()
 	c.initHistoricalBorrowingLastSampleLocked()
 	c.hb.lastSample[historicalSeededKey("cohort", string(name))] = now.Add(-elapsed)
-	status, _, found := c.SampleCohortHistoricalBorrowing(name, now)
+	status, _, found := c.SyncCohortHistoricalBorrowing(name, nil, now, true)
 	return status, found
+}
+
+// loadCQ loads a persisted status into the CQ as a non-leader replica does.
+func loadCQ(c *Cache, name kueue.ClusterQueueReference, status *kueue.HistoricalBorrowingStatus) {
+	c.SyncCQHistoricalBorrowing(name, status, time.Now(), false)
+}
+
+// loadCohort is loadCQ for a Cohort.
+func loadCohort(c *Cache, name kueue.CohortReference, status *kueue.HistoricalBorrowingStatus) {
+	c.SyncCohortHistoricalBorrowing(name, status, time.Now(), false)
 }
 
 func historicalBorrowingCfg() *configapi.HistoricalBorrowingConfig {
@@ -93,13 +103,14 @@ func cpuCores(n int64) resources.Amount {
 }
 
 // cpuHistoryStatus builds a persisted status carrying milli cpu of remembered
-// borrowing, used to drive the seeding/restore paths.
+// borrowing, used to drive the load/restore paths. Its LastUpdate is a second
+// ahead so it is newer than the load the cache does when adding the node.
 func cpuHistoryStatus(milli int64) *kueue.HistoricalBorrowingStatus {
 	return &kueue.HistoricalBorrowingStatus{
 		BorrowedResources: corev1.ResourceList{
 			corev1.ResourceCPU: resources.NewResourceFormatter().ResourceQuantity(corev1.ResourceCPU, milli),
 		},
-		LastUpdate: metav1.Now(),
+		LastUpdate: metav1.NewTime(time.Now().Add(time.Second)),
 	}
 }
 

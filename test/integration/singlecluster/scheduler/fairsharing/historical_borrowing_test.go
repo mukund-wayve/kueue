@@ -150,6 +150,19 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 		}
 	}
 
+	// expectHistoryOrder frees lender cpu one at a time and expects the slots to
+	// go to idle, remembered, idle, idle. History ranks remembered behind idle,
+	// but it does not count as borrowing, so remembered's first workload, within
+	// its nominal quota, goes ahead of idle's borrowing ones.
+	expectHistoryOrder := func(lender *kueue.ClusterQueue, idle, remembered string) {
+		ginkgo.GinkgoHelper()
+		for _, want := range []struct{ idle, remembered int32 }{{1, 0}, {1, 1}, {2, 1}, {3, 1}} {
+			integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 1)
+			expectReserving(idle, want.idle)
+			expectReserving(remembered, want.remembered)
+		}
+	}
+
 	// borrowedCPU returns the persisted cpu historical borrowing from a
 	// FairSharingStatus, or the zero Quantity when no history is recorded.
 	borrowedCPU := func(fs *kueue.FairSharingStatus) resource.Quantity {
@@ -340,29 +353,14 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 		ginkgo.By("Queueing equal demand on a and b while lender holds all capacity")
 		queueBehindLender(lender, "b", "a")
 
-		ginkgo.By("Freeing 2 cpu one at a time; the idle b wins both")
-		integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 1)
-		expectReserving("b", 1)
-		integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 1)
-		gomega.Eventually(func(g gomega.Gomega) {
-			cqAStatus := &kueue.ClusterQueue{}
-			cqBStatus := &kueue.ClusterQueue{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "a"}, cqAStatus)).To(gomega.Succeed())
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "b"}, cqBStatus)).To(gomega.Succeed())
-			g.Expect(cqBStatus.Status.ReservingWorkloads).To(gomega.Equal(int32(2)))
-			g.Expect(cqAStatus.Status.ReservingWorkloads).To(gomega.Equal(int32(0)))
-		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-		gomega.Consistently(func(g gomega.Gomega) {
-			cq := &kueue.ClusterQueue{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "a"}, cq)).To(gomega.Succeed())
-			g.Expect(cq.Status.ReservingWorkloads).To(gomega.Equal(int32(0)))
-		}, behavioral.ConsistentDuration, behavioral.Interval).Should(gomega.Succeed())
+		ginkgo.By("Freeing 4 cpu one at a time; b wins every slot but a's within-nominal one")
+		expectHistoryOrder(lender, "b", "a")
 	})
 
 	ginkgo.It("penalizes a remembered borrowing cohort in admission order", func() {
 		// Cohort analogue of the ClusterQueue ordering spec: the seeded history
 		// lives on a child cohort (ch-a), so its inflated dominant resource share
-		// must shut out ch-a's member CQ in favor of the idle sibling cohort's CQ.
+		// must rank ch-a's member CQ behind the idle sibling cohort's CQ.
 		startHB(hbFairSharing(time.Second, time.Hour))
 		createFlavor()
 
@@ -382,29 +380,14 @@ var _ = ginkgo.Describe("Scheduler Historical Borrowing Fair Sharing", ginkgo.La
 		ginkgo.By("Queueing equal demand on cq-a and cq-b while lender holds all capacity")
 		queueBehindLender(lender, "cq-b", "cq-a")
 
-		ginkgo.By("Freeing 2 cpu one at a time; the idle cohort's cq-b wins both")
-		integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 1)
-		expectReserving("cq-b", 1)
-		integration.FinishRunningWorkloadsInCQ(ctx, k8sClient, lender, 1)
-		gomega.Eventually(func(g gomega.Gomega) {
-			cqA := &kueue.ClusterQueue{}
-			cqB := &kueue.ClusterQueue{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cq-a"}, cqA)).To(gomega.Succeed())
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cq-b"}, cqB)).To(gomega.Succeed())
-			g.Expect(cqB.Status.ReservingWorkloads).To(gomega.Equal(int32(2)))
-			g.Expect(cqA.Status.ReservingWorkloads).To(gomega.Equal(int32(0)))
-		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
-		gomega.Consistently(func(g gomega.Gomega) {
-			cq := &kueue.ClusterQueue{}
-			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "cq-a"}, cq)).To(gomega.Succeed())
-			g.Expect(cq.Status.ReservingWorkloads).To(gomega.Equal(int32(0)))
-		}, behavioral.ConsistentDuration, behavioral.Interval).Should(gomega.Succeed())
+		ginkgo.By("Freeing 4 cpu one at a time; cq-b wins every slot but cq-a's within-nominal one")
+		expectHistoryOrder(lender, "cq-b", "cq-a")
 	})
 
 	ginkgo.It("does not penalize a remembered borrower when borrowingHistoryWeight is zero", func() {
 		// k=0 disables the historical contribution to the DRS score, validating
 		// the new knob end to end (config -> cache -> snapshot). Contrast with the
-		// k>0 spec above, where the remembered borrower a is shut out.
+		// k>0 spec above, where the remembered borrower a ranks behind b.
 		startHB(hbFairSharing(time.Second, time.Hour, 0))
 		createFlavor()
 

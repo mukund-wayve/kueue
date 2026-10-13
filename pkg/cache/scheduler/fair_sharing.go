@@ -48,13 +48,11 @@ type DRS struct {
 	fairWeight       float64
 	unweightedRatio  float64
 	dominantResource corev1.ResourceName
-	// borrowing tracks whether the node is borrowing on any resource. With the
-	// HistoricalBorrowing strategy this includes remembered borrowing, so it can
-	// be true even when current usage is below quota.
+	// borrowing tracks whether the node currently uses more than its quota on
+	// any resource. Remembered borrowing (HistoricalBorrowing strategy) only
+	// raises unweightedRatio and never sets it.
 	borrowing bool
-	// borrowedFRs records which FlavorResources the node is considered to borrow
-	// on. With the HistoricalBorrowing strategy, when remembered borrowing drives
-	// the score for a resource, every flavor of that resource is listed.
+	// borrowedFRs records the FlavorResources the node currently borrows on.
 	borrowedFRs []resources.FlavorResource
 }
 
@@ -72,9 +70,7 @@ func (d DRS) IsZero() bool {
 	return d.unweightedRatio == 0
 }
 
-// IsBorrowing returns whether the node is borrowing on any resource. Under the
-// HistoricalBorrowing strategy this includes remembered borrowing, so it can be
-// true even when the node's current usage is below its quota.
+// IsBorrowing returns whether the node currently borrows on any resource.
 func (d DRS) IsBorrowing() bool {
 	return d.borrowing
 }
@@ -180,14 +176,15 @@ func dominantResourceShare(node dominantResourceShareNode, wlReq resources.Flavo
 			borrowedFRs = append(borrowedFRs, fr)
 		}
 	}
-	// Under the HistoricalBorrowing strategy, fold remembered borrowing into the
-	// instantaneous result before the no-borrowing short-circuit, so a node that
-	// borrowed recently still scores as borrowing. No-op otherwise.
-	history, borrowedFRs := historicalBorrowingTerms(node, wlReq, borrowing, borrowedFRs)
+	// Under the HistoricalBorrowing strategy, remembered borrowing raises the
+	// ratio before the no-borrowing short-circuit, so a node that borrowed
+	// recently still has a non-zero share. It does not mark the node as
+	// borrowing. No-op otherwise.
+	history := historicalBorrowingTerms(node, borrowing)
 	if len(borrowing) == 0 {
 		return drs
 	}
-	drs.borrowing = true
+	drs.borrowing = len(borrowedFRs) > 0
 	drs.borrowedFRs = borrowedFRs
 
 	// Maintained by updateCohortLendable alongside SubtreeQuota. The parent is

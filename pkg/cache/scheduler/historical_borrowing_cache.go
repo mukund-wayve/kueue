@@ -38,11 +38,11 @@ type historicalBorrowingState struct {
 	// cfg is set only when fairSharing.strategy is HistoricalBorrowing, so a
 	// non-nil value means the strategy is selected.
 	cfg *config.HistoricalBorrowingConfig
-	// lastSample holds, per seeded ClusterQueue/Cohort, the time of its last EMA
-	// sample. A present key means the node was seeded, so seeding happens at
-	// most once each. Sampling is timed from this in-memory clock rather than
-	// the persisted status, so a failed or lagging status write cannot make the
-	// next tick re-apply an interval the EMA already absorbed.
+	// lastSample holds, per loaded ClusterQueue/Cohort, the time of its last EMA
+	// sample (or of the persisted status it was loaded from). A present key
+	// means the node was loaded. Sampling is timed from this in-memory clock
+	// rather than the persisted status, so a failed or lagging status write
+	// cannot make the next tick re-apply an interval the EMA already absorbed.
 	lastSample map[string]time.Time
 }
 
@@ -118,14 +118,19 @@ func (c *Cache) initHistoricalBorrowingLastSampleLocked() {
 	}
 }
 
-// ensureHistoricalBorrowingSeededLocked seeds node from its persisted status
-// once, and starts its sampling clock at the persisted LastUpdate (so the next
-// sample also decays across a controller restart) or at now for a fresh node.
-func (c *Cache) ensureHistoricalBorrowingSeededLocked(key string, node hierarchicalResourceNode, status *kueue.HistoricalBorrowingStatus, now time.Time) {
+// loadIfNewerLocked replaces the node's in-memory history with status when the
+// node has not been loaded yet, or when status is newer than the last in-memory
+// sample (another replica sampled and wrote it). The sampling clock restarts at
+// the persisted LastUpdate, so the next sample also decays across a restart or
+// failover, or at now for a node without saved state. The leader never reloads
+// its own writes: it persists LastUpdate equal to its in-memory sample time.
+func (c *Cache) loadIfNewerLocked(key string, node hierarchicalResourceNode, status *kueue.HistoricalBorrowingStatus, now time.Time) {
 	c.initHistoricalBorrowingLastSampleLocked()
-	if _, seeded := c.hb.lastSample[key]; seeded {
+	last, loaded := c.hb.lastSample[key]
+	if loaded && (status == nil || !status.LastUpdate.After(last)) {
 		return
 	}
+	clear(node.getResourceNode().HistoricalBorrowing)
 	seedHistoricalBorrowingNode(node, status)
 	c.hb.lastSample[key] = now
 	if status != nil && !status.LastUpdate.IsZero() {
@@ -133,29 +138,52 @@ func (c *Cache) ensureHistoricalBorrowingSeededLocked(key string, node hierarchi
 	}
 }
 
-// clearHistoricalBorrowingSeededLocked forgets that a ClusterQueue or Cohort was
-// seeded, so that a later object with the same name is re-seeded from its
-// persisted status instead of starting from an empty in-memory average. The
-// caller must hold the cache write lock.
-func (c *Cache) clearHistoricalBorrowingSeededLocked(kind, name string) {
-	delete(c.hb.lastSample, historicalSeededKey(kind, name))
+// loadHistoricalBorrowingOnAddLocked loads saved history when the cache first
+// sees a ClusterQueue or Cohort, so the scheduler never snapshots the node
+// without it after a restart.
+func (c *Cache) loadHistoricalBorrowingOnAddLocked(key string, node hierarchicalResourceNode, rn *resourceNode, fs *kueue.FairSharingStatus) {
+	if !c.HistoricalBorrowingActive() {
+		return
+	}
+	var status *kueue.HistoricalBorrowingStatus
+	if fs != nil {
+		status = fs.HistoricalBorrowingStatus
+	}
+	c.ensureHistoricalBorrowingNodeLocked(rn)
+	c.loadIfNewerLocked(key, node, status, time.Now().Truncate(time.Second))
 }
 
-// sampleHistoricalBorrowingLocked applies an EMA sample to node, which callers
-// must have verified is non-nil and present in the cache, once a sampling
-// interval has passed since its previous sample. Otherwise it returns the
-// remaining wait and leaves the EMA untouched.
-func (c *Cache) sampleHistoricalBorrowingLocked(key string, node hierarchicalResourceNode, now time.Time) (*kueue.HistoricalBorrowingStatus, time.Duration) {
-	c.initHistoricalBorrowingLastSampleLocked()
-	interval := c.hb.cfg.BorrowingSamplingInterval.Duration
-	last, seeded := c.hb.lastSample[key]
-	if !seeded {
-		c.hb.lastSample[key] = now
-		return nil, interval
+// forgetCohortHistoricalBorrowingLocked drops a deleted Cohort's history. A
+// Cohort still referenced by children survives deletion as an implicit node, so
+// its map is cleared too.
+func (c *Cache) forgetCohortHistoricalBorrowingLocked(name kueue.CohortReference) {
+	delete(c.hb.lastSample, historicalSeededKey("cohort", string(name)))
+	if cohort := c.hm.Cohort(name); cohort != nil {
+		clear(cohort.resourceNode.HistoricalBorrowing)
 	}
+}
+
+// syncHistoricalBorrowingLocked loads status if it is newer than memory and,
+// on the leader, applies an EMA sample once a sampling interval has passed since
+// the previous one. Otherwise it returns the remaining wait (zero for
+// non-leaders) and leaves the EMA untouched.
+func (c *Cache) syncHistoricalBorrowingLocked(
+	key string,
+	node hierarchicalResourceNode,
+	rn *resourceNode,
+	status *kueue.HistoricalBorrowingStatus,
+	now time.Time,
+	leader bool,
+) (*kueue.HistoricalBorrowingStatus, time.Duration) {
+	c.ensureHistoricalBorrowingNodeLocked(rn)
+	c.loadIfNewerLocked(key, node, status, now)
+	if !leader {
+		return nil, 0
+	}
+	interval := c.hb.cfg.BorrowingSamplingInterval.Duration
 	// A last sample in the future (clock skew in a restored LastUpdate) would
 	// give a negative alpha and move the EMA the wrong way.
-	elapsed := max(0, now.Sub(last))
+	elapsed := max(0, now.Sub(c.hb.lastSample[key]))
 	if elapsed < interval {
 		return nil, interval - elapsed
 	}
@@ -164,44 +192,19 @@ func (c *Cache) sampleHistoricalBorrowingLocked(key string, node hierarchicalRes
 	return historicalBorrowingStatus(node, now), 0
 }
 
-// EnsureCQHistoricalBorrowingSeeded seeds the CQ's historical borrowing once.
-func (c *Cache) EnsureCQHistoricalBorrowingSeeded(name kueue.ClusterQueueReference, status *kueue.HistoricalBorrowingStatus, now time.Time) {
-	if !c.HistoricalBorrowingActive() {
-		return
-	}
-	c.Lock()
-	defer c.Unlock()
-	cq := c.hm.ClusterQueue(name)
-	if cq == nil {
-		return
-	}
-	c.ensureHistoricalBorrowingNodeLocked(&cq.resourceNode)
-	c.ensureHistoricalBorrowingSeededLocked(historicalSeededKey("cq", string(name)), cq, status, now)
-}
-
-// EnsureCohortHistoricalBorrowingSeeded seeds the Cohort's historical borrowing once.
-func (c *Cache) EnsureCohortHistoricalBorrowingSeeded(name kueue.CohortReference, status *kueue.HistoricalBorrowingStatus, now time.Time) {
-	if !c.HistoricalBorrowingActive() {
-		return
-	}
-	c.Lock()
-	defer c.Unlock()
-	cohort := c.hm.Cohort(name)
-	if cohort == nil {
-		return
-	}
-	c.ensureHistoricalBorrowingNodeLocked(&cohort.resourceNode)
-	c.ensureHistoricalBorrowingSeededLocked(historicalSeededKey("cohort", string(name)), cohort, status, now)
-}
-
-// SampleCQHistoricalBorrowing applies an EMA sample for the ClusterQueue if a
-// sampling interval has passed since its previous sample. A positive wait means
-// no sample was taken yet and is the time until the next one is due. The
-// returned found reports whether the ClusterQueue is present in the cache; it is
-// false when the strategy is inactive or the node is not (yet) cached, which
-// lets callers tell "not sampled" apart from "sampled and decayed to empty"
-// (the latter returns a nil status, zero wait and found==true).
-func (c *Cache) SampleCQHistoricalBorrowing(name kueue.ClusterQueueReference, now time.Time) (status *kueue.HistoricalBorrowingStatus, wait time.Duration, found bool) {
+// SyncCQHistoricalBorrowing loads the ClusterQueue's persisted history if it is
+// newer than memory and, when leader, samples it. A positive wait means no
+// sample was taken yet and is the time until the next one is due. The returned
+// found reports whether the ClusterQueue is present in the cache; it is false
+// when the strategy is inactive or the node is not (yet) cached, which lets
+// callers tell "not sampled" apart from "sampled and decayed to empty" (the
+// latter returns a nil status, zero wait and found==true).
+func (c *Cache) SyncCQHistoricalBorrowing(
+	name kueue.ClusterQueueReference,
+	status *kueue.HistoricalBorrowingStatus,
+	now time.Time,
+	leader bool,
+) (newStatus *kueue.HistoricalBorrowingStatus, wait time.Duration, found bool) {
 	if !c.HistoricalBorrowingActive() {
 		return nil, 0, false
 	}
@@ -211,14 +214,17 @@ func (c *Cache) SampleCQHistoricalBorrowing(name kueue.ClusterQueueReference, no
 	if cq == nil {
 		return nil, 0, false
 	}
-	c.ensureHistoricalBorrowingNodeLocked(&cq.resourceNode)
-	status, wait = c.sampleHistoricalBorrowingLocked(historicalSeededKey("cq", string(name)), cq, now)
-	return status, wait, true
+	newStatus, wait = c.syncHistoricalBorrowingLocked(historicalSeededKey("cq", string(name)), cq, &cq.resourceNode, status, now, leader)
+	return newStatus, wait, true
 }
 
-// SampleCohortHistoricalBorrowing applies an EMA sample for the Cohort; see
-// SampleCQHistoricalBorrowing for the wait and found semantics.
-func (c *Cache) SampleCohortHistoricalBorrowing(name kueue.CohortReference, now time.Time) (status *kueue.HistoricalBorrowingStatus, wait time.Duration, found bool) {
+// SyncCohortHistoricalBorrowing is SyncCQHistoricalBorrowing for a Cohort.
+func (c *Cache) SyncCohortHistoricalBorrowing(
+	name kueue.CohortReference,
+	status *kueue.HistoricalBorrowingStatus,
+	now time.Time,
+	leader bool,
+) (newStatus *kueue.HistoricalBorrowingStatus, wait time.Duration, found bool) {
 	if !c.HistoricalBorrowingActive() {
 		return nil, 0, false
 	}
@@ -228,9 +234,8 @@ func (c *Cache) SampleCohortHistoricalBorrowing(name kueue.CohortReference, now 
 	if cohort == nil {
 		return nil, 0, false
 	}
-	c.ensureHistoricalBorrowingNodeLocked(&cohort.resourceNode)
-	status, wait = c.sampleHistoricalBorrowingLocked(historicalSeededKey("cohort", string(name)), cohort, now)
-	return status, wait, true
+	newStatus, wait = c.syncHistoricalBorrowingLocked(historicalSeededKey("cohort", string(name)), cohort, &cohort.resourceNode, status, now, leader)
+	return newStatus, wait, true
 }
 
 func historicalBorrowingStatus(node hierarchicalResourceNode, now time.Time) *kueue.HistoricalBorrowingStatus {
